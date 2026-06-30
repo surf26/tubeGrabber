@@ -1,0 +1,85 @@
+# tube_ws 主配置文件
+# 路径均相对于项目根目录 tube_ws/
+
+arm:
+  ip: "192.168.1.18"
+  port: 8080
+  default_speed: 20          # SDK 速度单位，调试阶段先慢
+  approach_speed: 10           # 靠近试管架时更慢
+
+camera:
+  serial: "CP84B4100090"
+  width: 640
+  height: 480
+  fps: 30
+  depth_min_mm: 100
+  depth_max_mm: 800
+
+gripper:
+  modbus_port: 1             # 末端 RS485，睿尔曼 JSON 协议 port=1
+  device_id: 1               # 夹爪 Modbus 从站地址，首次联调后按实际修改
+  baudrate: 115200
+  full_stroke: 256000
+  open_position: 256000      # 张开目标步数，需实测标定后修改
+  close_position: 0          # 闭合目标步数，需实测标定后修改
+  # 法兰 → 夹爪 TCP（指尖/抓取中心），末端坐标系下平移 mm；视觉 base_xyz 为 TCP 目标点
+  tcp_offset_mm: [0, 0, -220]   # 实测：法兰原点到夹爪指尖，常见为 ee -Z 方向负值
+  reg_position: 36           # 以夹爪手册为准
+  reg_speed: 38
+  reg_force: 40
+  reg_command: 43
+  modbus_timeout: 2            # rm_set_modbus_mode 超时，单位 100ms
+  position_reg_count: 2        # 位置占 2 个 16 位寄存器（32 位步数）
+  move_timeout_s: 5.0
+  position_tolerance: 500      # 到位容差（步）
+
+yolo:
+  model_path: "data/models/best.pt"
+  conf_threshold: 0.5
+  iou_threshold: 0.45
+  classes:
+    0: empty
+    1: tube
+
+vision:
+  refine_conf_threshold: 0.6   # 精定位时可比全局扫描更严
+  display_enabled: true         # imshow 总开关
+  scan_imshow_wait_ms: 0        # 0=按键继续，>0 自动停留毫秒
+  refine_imshow_wait_ms: 0
+  live_preview_fps: 15          # 臂移动时相机预览帧率（无 YOLO）
+  font_scale: 0.28              # 640x480 用小字号
+
+motion:
+  approach_height_mm: 50       # 精定位前停在目标上方 5 cm
+  pick_insert_mm: 25           # 抓取下降深度，实测调整
+  pick_retreat_mm: 100         # 夹取后上提 10 cm
+  place_insert_mm: 20          # 放置插入深度
+  place_retreat_mm: 100        # 放置后上提高度
+
+poses:
+  scan_pose: "config/poses/scan_pose.json"
+  vertical_ee_pose: "config/poses/vertical.json"       # 抓取/精定位时的末端姿态参考
+  left_region_pose: "config/poses/left_region.json"
+  right_region_pose: "config/poses/right_region.json"
+  lift_pose: "config/poses/lift_pose.json"             # 夹取或放置后提起
+
+paths:
+  transit_z_offset_mm: 80      # 路点中间抬高量
+
+rack:
+  rows: 4
+  cols: 3
+  sides: ["left", "right"]
+  left_col_order: [3, 2, 1]    # 左架列：3 2 1（从右到左）
+  right_col_order: [1, 2, 3]   # 右架列：1 2 3
+  left_row_order: ["a", "b", "c", "d"]   # 上 → 下
+  right_row_order: ["d", "c", "b", "a"]  # 对应物理 D,C,B,A
+
+registry:
+  slot_match_max_dist_mm: 15   # 精定位时检测中心与预期槽的最大偏差
+
+# 标定文件路径（具体矩阵内容见对应 yaml）
+calib:
+  hand_eye: "config/hand_eye.yaml"
+  camera_intrinsics: "config/camera_intrinsics.yaml"
+  rack_layout: "config/rack_layout.yaml"

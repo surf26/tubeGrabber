@@ -1,0 +1,30 @@
+# 奥比中光 336L @ 640×480（运行时）
+# fx/fy/cx/cy：当前抓取分辨率下的内参
+# 畸变可能要重标
+
+width: 640
+height: 480
+
+fx: 367.5447998
+fy: 367.60284424
+cx: 320.26034546
+cy: 244.70648193
+
+K:
+  - [367.5447998, 0.0, 320.26034546]
+  - [0.0, 367.60284424, 244.70648193]
+  - [0.0, 0.0, 1.0]
+
+# OpenCV plumb_bob 顺序: [k1, k2, p1, p2, k3]
+distortion_model: plumb_bob
+distortion_source: data/eye_in_hand/dataset.json
+
+distortion:
+  k1: -0.03358
+  k2: 0.03533
+  p1: -7.30e-5
+  p2: 4.23e-4
+  k3: -0.01242
+
+# 供 cv2.undistort / undistortPoints 直接使用
+distortion_coeffs: [-0.03358, 0.03533, -7.30e-5, 4.23e-4, -0.01242]

@@ -1,0 +1,6 @@
+numpy
+opencv-python
+pyyaml
+ultralytics
+pyorbbecsdk2
+Robotic_Arm
