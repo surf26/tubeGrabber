@@ -18,22 +18,31 @@ class ArmDriver:
         self._arm: RoboticArm | None = None
         self._handle = None
 
-    def connect(self) -> bool:
-        """连接机械臂。成功返回 True，失败返回 False。"""
+    def connect(self) -> None:
+        """连接机械臂，失败抛出 ArmDriverError。"""
         if self._arm is not None:
-            return True
+            return
 
+        target = f"{self._ip}:{self._port}"
         try:
             self._arm = RoboticArm(rm_thread_mode_e.RM_TRIPLE_MODE_E)
             self._handle = self._arm.rm_create_robot_arm(self._ip, self._port)
+            if self._handle is None or (isinstance(self._handle, int) and self._handle < 0):
+                raise ArmDriverError(
+                    f"rm_create_robot_arm 失败 ({target})，handle={self._handle!r}"
+                )
+
             code, _ = self._arm.rm_get_current_arm_state()
             if code != 0:
                 self.disconnect()
-                return False
-            return True
-        except Exception:
+                raise ArmDriverError(f"连接后读取状态失败 ({target})，SDK 错误码: {code}")
+        except ArmDriverError:
+            raise
+        except Exception as exc:
             self.disconnect()
-            return False
+            raise ArmDriverError(
+                f"连接异常 ({target}): {type(exc).__name__}: {exc}"
+            ) from exc
 
     def disconnect(self) -> None:
         """断开连接并释放 SDK 资源。"""

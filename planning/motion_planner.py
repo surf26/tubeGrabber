@@ -198,14 +198,18 @@ class MotionPlanner:
         approach_pose: tuple[float, float, float, float, float, float],
         insert_mm: float,
     ) -> tuple[float, float, float, float, float, float]:
-        """沿末端 -Z 下降 insert_mm，使 TCP 下探抓取/放置。"""
+        """
+        从 approach 下降到管口，再沿 EE +Z 插入 insert_mm（竖直向下时 TCP 在基坐标下降）。
+        pick_insert_mm / place_insert_mm 表示进入管内深度，不含 approach 悬空段。
+        """
         x, y, z, rx, ry, rz = approach_pose
         tip = np.array(
             flange_xyz_to_tip_xyz((x, y, z), (rx, ry, rz), self._tcp_offset_mm),
             dtype=np.float64,
         )
         R = rotation_matrix_rpy(rx, ry, rz)
-        tip -= R @ np.array([0.0, 0.0, float(insert_mm)])
+        total_descent = self._approach_height_mm + float(insert_mm)
+        tip += R @ np.array([0.0, 0.0, total_descent])
         flange_xyz = tip_xyz_to_flange_xyz(tip, (rx, ry, rz), self._tcp_offset_mm)
         return (*flange_xyz, rx, ry, rz)
 

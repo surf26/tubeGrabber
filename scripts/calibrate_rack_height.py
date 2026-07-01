@@ -115,12 +115,8 @@ def main() -> int:
             fps=cam_cfg["fps"],
         )
         try:
-            if not arm.connect():
-                print("机械臂连接失败")
-                return 1
-            if not cam.connect():
-                print("相机连接失败")
-                return 1
+            arm.connect()
+            cam.connect()
             arm.move_p(pose_6d, speed=speed)
             arm.wait_motion_done()
             frame = cam.capture()

@@ -16,11 +16,8 @@ def main() -> int:
     arm = ArmDriver(cfg["arm"]["ip"], cfg["arm"]["port"])
 
     print(f"连接 {cfg['arm']['ip']}:{cfg['arm']['port']} ...")
-    if not arm.connect():
-        print("连接失败")
-        return 1
-
     try:
+        arm.connect()
         pose = arm.get_pose_6d()
         x, y, z, rx, ry, rz = pose
         print("连接成功")
@@ -28,7 +25,7 @@ def main() -> int:
         print(f"            rx={rx:.3f}, ry={ry:.3f}, rz={rz:.3f}")
         print("请与示教器 TCP 坐标对比（位置应为 mm 量级）")
     except ArmDriverError as exc:
-        print(f"读位姿失败: {exc}")
+        print(f"失败: {exc}")
         return 1
     finally:
         arm.disconnect()

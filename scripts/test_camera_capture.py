@@ -22,15 +22,12 @@ def main() -> int:
         fps=cfg.get("fps", 30),
     )
 
-    print(f"连接相机 serial={cfg['serial']} ...")
-    if not cam.connect():
-        print("连接失败（检查 USB / serial / udev 权限）")
-        return 1
-
     out_dir = PROJECT_ROOT / "data" / "captures"
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    print(f"连接相机 serial={cfg['serial']} ...")
     try:
+        cam.connect()
         print("连续抓 5 帧（connect 时已 warmup）...")
         frame = None
         for i in range(5):
@@ -50,7 +47,7 @@ def main() -> int:
         print(f"已保存: {color_path}")
         print(f"已保存: {depth_path}")
     except CameraDriverError as exc:
-        print(f"取帧失败: {exc}")
+        print(f"失败: {exc}")
         return 1
     finally:
         cam.disconnect()

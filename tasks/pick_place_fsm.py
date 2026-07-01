@@ -264,19 +264,13 @@ class PickPlaceFSM:
     def _do_check_hw(self) -> bool:
         print("[CHECK_HW] 连接硬件...")
         if not self._arm.is_connected():
-            if not self._arm.connect():
-                self._fail("机械臂连接失败")
-                return False
-        if not self._camera.connect():
-            self._fail("相机连接失败")
-            return False
+            self._arm.connect()
+        self._camera.connect()
         self._viz.bind_camera(self._camera)
         if not self._skip_gripper:
             if self._gripper is None:
                 self._gripper = GripperDriver(self._arm, self._config["gripper"])
-            if not self._gripper.setup_modbus():
-                self._fail("夹爪 Modbus 配置失败")
-                return False
+            self._gripper.setup_modbus()
             self._gripper.open()
         self._last_pose = self._arm.get_pose_6d()
         print("[CHECK_HW] OK")

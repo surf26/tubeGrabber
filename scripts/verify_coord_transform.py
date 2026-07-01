@@ -98,12 +98,8 @@ def run_live() -> int:
     )
 
     try:
-        if not arm.connect():
-            print("机械臂连接失败")
-            return 1
-        if not cam.connect():
-            print("相机连接失败")
-            return 1
+        arm.connect()
+        cam.connect()
 
         print("移动到 scan_pose ...")
         arm.move_p(scan_pose, speed=arm_cfg["approach_speed"], block=True)

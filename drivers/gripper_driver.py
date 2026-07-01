@@ -35,15 +35,18 @@ class GripperDriver:
 
         self._modbus_ready = False
 
-    def setup_modbus(self) -> bool:
-        """配置末端 RS485 为 Modbus RTU 主站。"""
+    def setup_modbus(self) -> None:
+        """配置末端 RS485 为 Modbus RTU 主站，失败抛出 GripperDriverError。"""
         robot = self._arm.get_robot()
         ret = robot.rm_set_modbus_mode(self._port, self._baudrate, self._modbus_timeout)
         if ret != 0:
             self._modbus_ready = False
-            return False
+            raise GripperDriverError(
+                f"rm_set_modbus_mode 失败，SDK 错误码: {ret} "
+                f"(port={self._port}, baudrate={self._baudrate}, "
+                f"timeout={self._modbus_timeout}x100ms, device_id={self._device})"
+            )
         self._modbus_ready = True
-        return True
 
     def get_position(self) -> int:
         """读取夹爪当前位置（步数）。"""

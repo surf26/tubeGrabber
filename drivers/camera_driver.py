@@ -57,20 +57,29 @@ class CameraDriver:
         self._align_filter: AlignFilter | None = None
         self._use_hw_d2c = False
 
-    def connect(self) -> bool:
-        """按 serial 打开设备，开启 RGB+Depth（深度对齐到彩色）。"""
+    def connect(self) -> None:
+        """按 serial 打开设备，失败抛出 CameraDriverError。"""
         if self._pipeline is not None:
-            return True
+            return
 
+        target = (
+            f"serial={self._serial}, {self._width}x{self._height}@{self._fps}fps"
+        )
         try:
             ctx = Context()
             device_list = ctx.query_devices()
-            if device_list.get_count() == 0:
-                return False
+            count = device_list.get_count()
+            if count == 0:
+                raise CameraDriverError(
+                    f"未发现 Orbbec 设备 ({target})，请检查 USB 连接与权限"
+                )
 
             device = device_list.get_device_by_serial_number(self._serial)
             if device is None:
-                return False
+                raise CameraDriverError(
+                    f"找不到 serial={self._serial!r} ({target})，"
+                    "请核对 config 中 camera.serial"
+                )
 
             pipeline = Pipeline(device)
             config = Config()
@@ -108,11 +117,14 @@ class CameraDriver:
 
             for _ in range(self._warmup_frames):
                 self.capture()
-
-            return True
-        except Exception:
+        except CameraDriverError:
             self.disconnect()
-            return False
+            raise
+        except Exception as exc:
+            self.disconnect()
+            raise CameraDriverError(
+                f"相机连接异常 ({target}): {type(exc).__name__}: {exc}"
+            ) from exc
 
     def disconnect(self) -> None:
         if self._pipeline is not None:

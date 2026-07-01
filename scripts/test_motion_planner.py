@@ -83,13 +83,26 @@ def main() -> int:
         pick_insert,
         float(load_config()["motion"]["pick_retreat_mm"]),
     )
+    motion = load_config()["motion"]
+    approach_h = float(motion["approach_height_mm"])
+    pick_insert_mm = float(motion["pick_insert_mm"])
+    tube_z = src_state.base_xyz[2] if src_state.base_xyz else float("nan")
+
     rx, ry, rz = pick_approach[3:6]
-    pick_tip = flange_xyz_to_tip_xyz(pick_approach[:3], (rx, ry, rz), np.array(tcp))
+    tcp_off = np.array(tcp)
+    tip_approach = flange_xyz_to_tip_xyz(pick_approach[:3], (rx, ry, rz), tcp_off)
+    tip_insert = flange_xyz_to_tip_xyz(pick_insert[:3], (rx, ry, rz), tcp_off)
+
     print()
-    print("抓取细节:")
-    print(f"  approach 法兰 z={pick_approach[2]:.1f} mm  TCP z={pick_tip[2]:.1f} mm")
-    print(f"  insert:  z={pick_insert[2]:.1f} mm")
-    print(f"  retreat: z={pick_retreat[2]:.1f} mm")
+    print("抓取细节 (TCP 高度):")
+    print(f"  管口 base_z={tube_z:.1f} mm")
+    print(f"  approach TCP z={tip_approach[2]:.1f} mm  (期望 ≈ base_z + {approach_h:.0f})")
+    print(f"  insert  TCP z={tip_insert[2]:.1f} mm  (期望 ≈ base_z - {pick_insert_mm:.0f})")
+    print(f"  TCP 下降量={tip_approach[2] - tip_insert[2]:.1f} mm  (期望 {approach_h + pick_insert_mm:.0f})")
+    if tip_insert[2] >= tip_approach[2]:
+        print("  [FAIL] insert TCP 应低于 approach")
+        return 1
+    print("  [OK] insert TCP z < approach TCP z")
 
     place_wps = planner.plan_place_transit(dst_state, pick_retreat)
     print()
@@ -100,12 +113,22 @@ def main() -> int:
     place_insert = planner.build_place_insert_pose(place_approach)
     place_retreat = planner.build_retreat_pose(
         place_insert,
-        float(load_config()["motion"]["place_retreat_mm"]),
+        float(motion["place_retreat_mm"]),
     )
+    place_insert_mm = float(motion["place_insert_mm"])
+    rack_z = dst_state.base_xyz[2] if dst_state.base_xyz else float("nan")
+    rx, ry, rz = place_approach[3:6]
+    tip_place_a = flange_xyz_to_tip_xyz(place_approach[:3], (rx, ry, rz), tcp_off)
+    tip_place_i = flange_xyz_to_tip_xyz(place_insert[:3], (rx, ry, rz), tcp_off)
     print()
-    print("放置细节:")
-    print(f"  insert:  z={place_insert[2]:.1f} mm")
-    print(f"  retreat: z={place_retreat[2]:.1f} mm")
+    print("放置细节 (TCP 高度):")
+    print(f"  架面 base_z={rack_z:.1f} mm")
+    print(f"  approach TCP z={tip_place_a[2]:.1f} mm")
+    print(f"  insert  TCP z={tip_place_i[2]:.1f} mm  (期望 ≈ base_z - {place_insert_mm:.0f})")
+    if tip_place_i[2] >= tip_place_a[2]:
+        print("  [FAIL] insert TCP 应低于 approach")
+        return 1
+    print("  [OK] insert TCP z < approach TCP z")
 
     return_wps = planner.plan_to_scan(place_retreat)
     print()

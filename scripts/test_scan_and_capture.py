@@ -63,14 +63,10 @@ def main() -> int:
 
     try:
         print("连接机械臂...")
-        if not arm.connect():
-            print("机械臂连接失败")
-            return 1
+        arm.connect()
 
         print("连接相机...")
-        if not cam.connect():
-            print("相机连接失败")
-            return 1
+        cam.connect()
 
         print(f"move_p → scan_pose (speed={speed}%)...")
         arm.move_p(scan_pose, speed=speed, block=True)

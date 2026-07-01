@@ -43,11 +43,8 @@ def main() -> int:
         return 130
 
     print(f"连接 {cfg['arm']['ip']}:{cfg['arm']['port']} ...")
-    if not arm.connect():
-        print("连接失败")
-        return 1
-
     try:
+        arm.connect()
         print("开始 move_p ...")
         arm.move_p(target, speed=speed, block=True)
         if not arm.wait_motion_done():
