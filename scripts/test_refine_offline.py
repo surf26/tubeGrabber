@@ -129,6 +129,7 @@ def main() -> int:
     print()
 
     max_dist = float(registry_cfg.get("slot_match_max_dist_mm", 15))
+    ambiguity_delta = float(registry_cfg.get("refine_ambiguity_min_delta_mm", 2))
     depth_min = cam_cfg.get("depth_min_mm", 100)
     depth_max = cam_cfg.get("depth_max_mm", 800)
 
@@ -155,6 +156,7 @@ def main() -> int:
                 T_ee_cam,
                 T_base_ee,
                 max_dist_xy_mm=max_dist,
+                ambiguity_min_delta_mm=ambiguity_delta,
                 depth_min_mm=depth_min,
                 depth_max_mm=depth_max,
             )
@@ -170,6 +172,7 @@ def main() -> int:
                 T_ee_cam,
                 T_base_ee,
                 max_dist_xy_mm=max_dist,
+                ambiguity_min_delta_mm=ambiguity_delta,
                 depth_min_mm=depth_min,
                 depth_max_mm=depth_max,
             )
@@ -184,7 +187,8 @@ def main() -> int:
         f"refine base_xyz: ({result.base_xyz[0]:.1f}, {result.base_xyz[1]:.1f}, "
         f"{result.base_xyz[2]:.1f})"
     )
-    print(f"dist_xy: {result.dist_xy_mm:.2f} mm (阈值 {max_dist} mm)")
+    print(f"dist_xy: {result.dist_xy_mm:.2f} mm (max_dist {max_dist} mm, "
+          f"ambiguity_delta {ambiguity_delta} mm)")
     print(f"conf: {result.confidence:.3f}, z_source: {result.z_source}")
     print(f"pixel_uv: ({result.pixel_uv[0]:.0f}, {result.pixel_uv[1]:.0f})")
     return 0

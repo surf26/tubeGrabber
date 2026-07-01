@@ -359,7 +359,7 @@ class PickPlaceFSM:
         pose_6d = self._arm.get_pose_6d()
         T_base_ee = pose_6d_to_matrix(pose_6d)
 
-        max_dist = float(self._registry_cfg.get("slot_match_max_dist_mm", 15))
+        max_dist, ambiguity_delta = self._refine_match_params()
         result = refine_pick_slot(
             self._cmd.src,
             self._registry,
@@ -371,6 +371,7 @@ class PickPlaceFSM:
             self._T_ee_cam,
             T_base_ee,
             max_dist_xy_mm=max_dist,
+            ambiguity_min_delta_mm=ambiguity_delta,
             depth_min_mm=self._cam_cfg.get("depth_min_mm", 100),
             depth_max_mm=self._cam_cfg.get("depth_max_mm", 800),
         )
@@ -422,7 +423,9 @@ class PickPlaceFSM:
             float(self._motion.get("pick_retreat_mm", 100)),
         )
         self._move_pose(retreat, self._arm_cfg["default_speed"], label="pick_retreat")
-        self._registry.update_slot(self._cmd.src, klass="empty", z_source="missing")
+        self._registry.update_slot(
+            self._cmd.src, klass="unknown", z_source="pending_verify"
+        )
         self._last_pose = retreat
         return True
 
@@ -461,7 +464,7 @@ class PickPlaceFSM:
         pose_6d = self._arm.get_pose_6d()
         T_base_ee = pose_6d_to_matrix(pose_6d)
 
-        max_dist = float(self._registry_cfg.get("slot_match_max_dist_mm", 15))
+        max_dist, ambiguity_delta = self._refine_match_params()
         result = refine_place_slot(
             self._cmd.dst,
             self._registry,
@@ -473,6 +476,7 @@ class PickPlaceFSM:
             self._T_ee_cam,
             T_base_ee,
             max_dist_xy_mm=max_dist,
+            ambiguity_min_delta_mm=ambiguity_delta,
             depth_min_mm=self._cam_cfg.get("depth_min_mm", 100),
             depth_max_mm=self._cam_cfg.get("depth_max_mm", 800),
         )
@@ -523,7 +527,9 @@ class PickPlaceFSM:
             float(self._motion.get("place_retreat_mm", 100)),
         )
         self._move_pose(retreat, self._arm_cfg["default_speed"], label="place_retreat")
-        self._registry.update_slot(self._cmd.dst, klass="tube", z_source="missing")
+        self._registry.update_slot(
+            self._cmd.dst, klass="unknown", z_source="pending_verify"
+        )
         self._last_pose = retreat
         return True
 
@@ -565,6 +571,13 @@ class PickPlaceFSM:
                 raise FSMError(f"move_p [{label}] 超时未到位")
         finally:
             self._viz.stop_live()
+
+    def _refine_match_params(self) -> tuple[float, float]:
+        """精定位 XY 匹配半径与歧义最小差距（mm），来自 config registry。"""
+        return (
+            float(self._registry_cfg.get("slot_match_max_dist_mm", 15)),
+            float(self._registry_cfg.get("refine_ambiguity_min_delta_mm", 2)),
+        )
 
     def _fail(self, reason: str) -> None:
         self._fail_reason = reason

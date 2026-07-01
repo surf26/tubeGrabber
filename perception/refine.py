@@ -38,6 +38,7 @@ def refine_pick_slot(
     T_base_ee: np.ndarray,
     *,
     max_dist_xy_mm: float = 15.0,
+    ambiguity_min_delta_mm: float = 2.0,
     depth_min_mm: float = 100,
     depth_max_mm: float = 800,
 ) -> RefineResult:
@@ -55,6 +56,7 @@ def refine_pick_slot(
         expected_klass="tube",
         z_override=None,
         max_dist_xy_mm=max_dist_xy_mm,
+        ambiguity_min_delta_mm=ambiguity_min_delta_mm,
         depth_min_mm=depth_min_mm,
         depth_max_mm=depth_max_mm,
     )
@@ -72,6 +74,7 @@ def refine_place_slot(
     T_base_ee: np.ndarray,
     *,
     max_dist_xy_mm: float = 15.0,
+    ambiguity_min_delta_mm: float = 2.0,
     depth_min_mm: float = 100,
     depth_max_mm: float = 800,
 ) -> RefineResult:
@@ -92,6 +95,7 @@ def refine_place_slot(
         expected_klass="empty",
         z_override=float(z_rack),
         max_dist_xy_mm=max_dist_xy_mm,
+        ambiguity_min_delta_mm=ambiguity_min_delta_mm,
         depth_min_mm=depth_min_mm,
         depth_max_mm=depth_max_mm,
     )
@@ -111,12 +115,14 @@ def refine_slot(
     expected_klass: str,
     z_override: float | None,
     max_dist_xy_mm: float = 15.0,
+    ambiguity_min_delta_mm: float = 2.0,
     depth_min_mm: float = 100,
     depth_max_mm: float = 800,
 ) -> RefineResult:
     """
     在基坐标系下匹配预期槽：refined base_xy 与 registry 预期 base_xy
     平面距离 <= max_dist_xy_mm 视为同一目标。
+    若多个候选落入该范围，最近与次近 dist_xy 差距 < ambiguity_min_delta_mm 则报歧义。
     """
     state = registry.get(slot_id)
     if state.base_xyz is None:
@@ -184,9 +190,11 @@ def refine_slot(
     best = min(candidates, key=lambda c: c.dist_xy_mm)
     if len(candidates) > 1:
         second = sorted(candidates, key=lambda c: c.dist_xy_mm)[1]
-        if second.dist_xy_mm - best.dist_xy_mm < 2.0:
+        delta = second.dist_xy_mm - best.dist_xy_mm
+        if delta < ambiguity_min_delta_mm:
             raise RefineError(
                 f"{slot_id} 精定位歧义: 最近 {best.dist_xy_mm:.1f}mm vs "
-                f"次近 {second.dist_xy_mm:.1f}mm"
+                f"次近 {second.dist_xy_mm:.1f}mm (差距 {delta:.1f}mm < "
+                f"{ambiguity_min_delta_mm:.1f}mm)"
             )
     return best

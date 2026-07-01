@@ -76,7 +76,8 @@ rack:
   right_row_order: ["d", "c", "b", "a"]  # 对应物理 D,C,B,A
 
 registry:
-  slot_match_max_dist_mm: 15   # 精定位时检测中心与预期槽的最大偏差
+  slot_match_max_dist_mm: 15        # 精定位候选与预期槽 base_xy 最大平面偏差 (mm)
+  refine_ambiguity_min_delta_mm: 2  # 最近/次近候选 dist_xy 最小差距，低于此报歧义；现场可试 5
 
 # 标定文件路径（具体矩阵内容见对应 yaml）
 calib:
