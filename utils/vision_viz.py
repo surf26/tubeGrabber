@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import select
 import sys
 import threading
 import time
+from typing import Any
 
 from utils.opencv_gui import cv2
 import numpy as np
@@ -269,34 +269,27 @@ class VisionDisplay:
 
     @staticmethod
     def _wait(window: str, wait_ms: int) -> None:
-        """等待继续：图像窗口按键，或终端按 Enter（Linux/Qt 下终端回车更可靠）。"""
+        """等待用户确认继续。"""
         if wait_ms > 0:
             cv2.waitKey(wait_ms)
             return
 
-        print(f"[{window}] 继续：点选图像窗口后 Enter/Space，或直接在本终端按 Enter")
+        # 有终端时直接用 input()，比 OpenCV waitKey 可靠（Qt 窗口常抢不到 Enter）
+        if sys.stdin.isatty():
+            print(f"[{window}] 查看弹窗图像后，在本终端按 Enter 继续...")
+            try:
+                input()
+            except EOFError:
+                pass
+            cv2.waitKey(1)
+            return
 
-        qt_continue = {16777220, 16777221, 16777232}  # Qt Return / Enter / Space
+        print(f"[{window}] 继续：点选图像窗口后 Enter/Space")
+        qt_continue = {16777220, 16777221, 16777232}
         ascii_continue = {13, 10, 32, ord("c"), ord("C")}
-
         while True:
             key = cv2.waitKeyEx(30)
-            if key != -1:
-                if key in qt_continue or (key & 0xFF) in ascii_continue:
-                    break
-
-            if VisionDisplay._stdin_has_enter():
+            if key != -1 and (
+                key in qt_continue or (key & 0xFF) in ascii_continue
+            ):
                 break
-
-    @staticmethod
-    def _stdin_has_enter() -> bool:
-        if not sys.stdin.isatty():
-            return False
-        try:
-            ready, _, _ = select.select([sys.stdin], [], [], 0)
-        except (ValueError, OSError):
-            return False
-        if not ready:
-            return False
-        sys.stdin.readline()
-        return True

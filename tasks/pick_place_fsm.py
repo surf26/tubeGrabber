@@ -294,6 +294,8 @@ class PickPlaceFSM:
         else:
             from_pose = self._last_pose or self._planner.scan_pose
             waypoints = self._planner.plan_to_scan(from_pose)
+        print(format_waypoints(waypoints))
+        print("[SCAN_GLOBAL] 路径已规划，自动开始移动")
         self._execute_waypoints(waypoints, phase="scan")
 
         self._arm.wait_motion_done()
@@ -353,6 +355,7 @@ class PickPlaceFSM:
         waypoints = self._planner.plan_pick_transit(src, from_pose)
         print(f"[PICK_TRANSIT] -> {self._cmd.src}")
         print(format_waypoints(waypoints))
+        print("[PICK_TRANSIT] 路径已规划，自动开始移动（移动过程中无需按 Enter）")
         self._execute_waypoints(waypoints, phase="pick_transit")
         self._last_pose = waypoints[-1].pose_6d
         return True
@@ -458,6 +461,7 @@ class PickPlaceFSM:
         waypoints = self._planner.plan_place_transit(dst, from_pose)
         print(f"[PLACE_TRANSIT] -> {self._cmd.dst}")
         print(format_waypoints(waypoints))
+        print("[PLACE_TRANSIT] 路径已规划，自动开始移动（移动过程中无需按 Enter）")
         self._execute_waypoints(waypoints, phase="place_transit")
         self._last_pose = waypoints[-1].pose_6d
         return True
@@ -571,29 +575,39 @@ class PickPlaceFSM:
         *,
         label: str,
     ) -> None:
+        cur = self._arm.get_pose_6d()
+        delta_mm = max(abs(cur[i] - pose[i]) for i in range(3))
         print(
             f"  move_p [{label}] "
             f"xyz=({pose[0]:.1f},{pose[1]:.1f},{pose[2]:.1f}) "
-            f"rpy=({pose[3]:.3f},{pose[4]:.3f},{pose[5]:.3f})"
+            f"rpy=({pose[3]:.3f},{pose[4]:.3f},{pose[5]:.3f}) "
+            f"| 当前xyz=({cur[0]:.1f},{cur[1]:.1f},{cur[2]:.1f}) Δ≈{delta_mm:.1f}mm"
         )
+        if self._near_pose(pose):
+            print(f"  move_p [{label}] 已在目标附近，跳过")
+            return
+
         self._viz.start_live()
         try:
-            self._arm.move_p(pose, speed=speed, block=False)
+            self._arm.move_p(pose, speed=speed, block=True)
             deadline = time.monotonic() + 120.0
-            stable_since: float | None = None
             while time.monotonic() < deadline:
-                self._viz.tick_live()
-                if self._near_pose(pose):
-                    now = time.monotonic()
-                    if stable_since is None:
-                        stable_since = now
-                    elif now - stable_since >= 0.25:
-                        break
-                else:
-                    stable_since = None
-                time.sleep(0.05)
-            else:
-                raise FSMError(f"move_p [{label}] 超时未到位")
+                if self._near_pose(pose, tol_mm=2.0, tol_rad=0.08):
+                    after = self._arm.get_pose_6d()
+                    moved = max(abs(after[i] - cur[i]) for i in range(3))
+                    print(
+                        f"  move_p [{label}] 到位 "
+                        f"xyz=({after[0]:.1f},{after[1]:.1f},{after[2]:.1f}) "
+                        f"移动量≈{moved:.1f}mm"
+                    )
+                    return
+                time.sleep(0.1)
+            after = self._arm.get_pose_6d()
+            raise FSMError(
+                f"move_p [{label}] 未到目标位："
+                f"目标=({pose[0]:.1f},{pose[1]:.1f},{pose[2]:.1f}) "
+                f"当前=({after[0]:.1f},{after[1]:.1f},{after[2]:.1f})"
+            )
         finally:
             self._viz.stop_live()
 

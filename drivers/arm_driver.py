@@ -36,6 +36,8 @@ class ArmDriver:
             if code != 0:
                 self.disconnect()
                 raise ArmDriverError(f"连接后读取状态失败 ({target})，SDK 错误码: {code}")
+
+            self._ensure_real_robot_ready()
         except ArmDriverError:
             raise
         except Exception as exc:
@@ -98,9 +100,34 @@ class ArmDriver:
             x, y, z, rx, ry, rz = pose_6d[:6]
             raise ArmDriverError(
                 f"move_p 失败，错误码: {ret} | "
-                f"目标(mm,rad)=({x:.1f},{y:.1f},{z:.1f},{rx:.3f},{ry:.3f},{rz:.3f}) speed={v}"
+                f"目标(mm,rad)=({x:.1f},{y:.1f},{z:.1f},{rx:.3f},{ry:.3f},{rz:.3f}) "
+                f"SDK(m,rad)=({sdk_pose[0]:.4f},{sdk_pose[1]:.4f},{sdk_pose[2]:.4f}) speed={v}"
             )
         return True
+
+    def _ensure_real_robot_ready(self) -> None:
+        """上电 + 真实机模式；仿真模式下指令成功但物理臂不动。"""
+        arm = self._require_arm()
+
+        if hasattr(arm, "rm_set_arm_run_mode"):
+            code, mode = arm.rm_get_arm_run_mode()
+            if code == 0 and mode == 0:
+                ret = arm.rm_set_arm_run_mode(1)
+                if ret != 0:
+                    raise ArmDriverError(
+                        f"设置真实机模式失败 (rm_set_arm_run_mode)，错误码: {ret}"
+                    )
+                print("[ArmDriver] 已从仿真模式切换为真实机模式")
+            elif code == 0:
+                print(f"[ArmDriver] run_mode={'真实机' if mode == 1 else f'仿真({mode})'}")
+
+        if hasattr(arm, "rm_get_arm_power_state"):
+            code, power = arm.rm_get_arm_power_state()
+            if code == 0 and power == 0 and hasattr(arm, "rm_set_arm_power"):
+                ret = arm.rm_set_arm_power(1)
+                if ret != 0:
+                    raise ArmDriverError(f"机械臂上电失败 (rm_set_arm_power)，错误码: {ret}")
+                print("[ArmDriver] 已发送上电指令")
 
     def move_j(
         self,
