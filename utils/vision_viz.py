@@ -6,7 +6,7 @@ import threading
 import time
 from typing import Any
 
-import cv2
+from utils.opencv_gui import cv2
 import numpy as np
 
 from perception.refine import RefineResult
