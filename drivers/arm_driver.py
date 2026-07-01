@@ -95,7 +95,11 @@ class ArmDriver:
         v = _clamp_speed(speed)
         ret = arm.rm_movej_p(sdk_pose, v, 0, 0, 1 if block else 0)
         if ret != 0:
-            raise ArmDriverError(f"move_p 失败，错误码: {ret}")
+            x, y, z, rx, ry, rz = pose_6d[:6]
+            raise ArmDriverError(
+                f"move_p 失败，错误码: {ret} | "
+                f"目标(mm,rad)=({x:.1f},{y:.1f},{z:.1f},{rx:.3f},{ry:.3f},{rz:.3f}) speed={v}"
+            )
         return True
 
     def move_j(

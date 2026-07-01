@@ -51,6 +51,7 @@ yolo:
 vision:
   refine_conf_threshold: 0.6   # 精定位时可比全局扫描更严
   display_enabled: true         # imshow 总开关
+  live_preview_enabled: true   # 臂移动时 camera_live；若 scan_view 黑屏可改 false
   scan_imshow_wait_ms: 0        # 0=按键继续，>0 自动停留毫秒
   refine_imshow_wait_ms: 0
   live_preview_fps: 15          # 臂移动时相机预览帧率（无 YOLO）

@@ -129,7 +129,7 @@ def _caption(img: np.ndarray, text: str, org: tuple[int, int]) -> None:
 
 
 class CameraPreview:
-    """移动过程中后台取流 imshow（纯相机画面，无 YOLO）。"""
+    """移动过程中取流；仅在主线程 tick() 里 imshow（OpenCV Qt 不支持多线程弹窗）。"""
 
     def __init__(
         self,
@@ -146,6 +146,7 @@ class CameraPreview:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._latest: np.ndarray | None = None
 
     @property
     def is_running(self) -> bool:
@@ -155,8 +156,9 @@ class CameraPreview:
         if self.is_running:
             return
         self._stop.clear()
+        self._latest = None
         cv2.namedWindow(self._window, cv2.WINDOW_NORMAL)
-        self._thread = threading.Thread(target=self._loop, name="camera_preview", daemon=True)
+        self._thread = threading.Thread(target=self._capture_loop, name="camera_preview", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
@@ -164,21 +166,27 @@ class CameraPreview:
         if self._thread is not None:
             self._thread.join(timeout=2.5)
             self._thread = None
-        try:
-            cv2.destroyWindow(self._window)
-        except Exception:
-            pass
+        with self._lock:
+            self._latest = None
 
-    def _loop(self) -> None:
+    def tick(self) -> None:
+        """主线程刷新预览（须在 move 等待循环中调用）。"""
+        if not self.is_running:
+            return
+        with self._lock:
+            img = None if self._latest is None else self._latest.copy()
+        if img is not None:
+            _caption(img, "LIVE preview (no YOLO tracking)", (6, 14))
+            cv2.imshow(self._window, np.ascontiguousarray(img))
+        cv2.waitKey(1)
+
+    def _capture_loop(self) -> None:
         while not self._stop.is_set():
             t0 = time.monotonic()
             try:
+                frame = self._camera.capture()
                 with self._lock:
-                    frame = self._camera.capture()
-                img = frame.color.copy()
-                _caption(img, "LIVE preview (no YOLO tracking)", (6, 14))
-                cv2.imshow(self._window, img)
-                cv2.waitKey(1)
+                    self._latest = frame.color.copy()
             except Exception:
                 pass
             elapsed = time.monotonic() - t0
@@ -191,6 +199,7 @@ class VisionDisplay:
     def __init__(self, config: dict[str, Any]) -> None:
         vis = config.get("vision", {})
         self._enabled = bool(vis.get("display_enabled", True))
+        self._live_preview = bool(vis.get("live_preview_enabled", True))
         self._scan_wait_ms = int(vis.get("scan_imshow_wait_ms", 0))
         self._refine_wait_ms = int(vis.get("refine_imshow_wait_ms", 0))
         self._font_scale = float(vis.get("font_scale", 0.28))
@@ -214,26 +223,44 @@ class VisionDisplay:
         if not self._enabled:
             return
         self.stop_live()
+        self._hide_live_window()
+        img = np.ascontiguousarray(bgr)
         cv2.namedWindow("scan_view", cv2.WINDOW_NORMAL)
-        cv2.imshow("scan_view", bgr)
+        cv2.imshow("scan_view", img)
+        cv2.resizeWindow("scan_view", img.shape[1], img.shape[0])
+        cv2.waitKey(1)
         self._wait("scan_view", self._scan_wait_ms)
 
     def show_refine(self, bgr: np.ndarray) -> None:
         if not self._enabled:
             return
         self.stop_live()
+        self._hide_live_window()
+        img = np.ascontiguousarray(bgr)
         cv2.namedWindow("refine_view", cv2.WINDOW_NORMAL)
-        cv2.imshow("refine_view", bgr)
+        cv2.imshow("refine_view", img)
+        cv2.resizeWindow("refine_view", img.shape[1], img.shape[0])
+        cv2.waitKey(1)
         self._wait("refine_view", self._refine_wait_ms)
 
     def start_live(self) -> None:
-        if not self._enabled or self._preview is None:
+        if not self._enabled or not self._live_preview or self._preview is None:
             return
         self._preview.start()
 
     def stop_live(self) -> None:
         if self._preview is not None:
             self._preview.stop()
+
+    def tick_live(self) -> None:
+        if self._preview is not None:
+            self._preview.tick()
+
+    def _hide_live_window(self) -> None:
+        try:
+            cv2.destroyWindow("camera_live")
+        except cv2.error:
+            pass
 
     def close_all(self) -> None:
         self.stop_live()

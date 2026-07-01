@@ -90,6 +90,7 @@ class PickPlaceFSM:
         self._last_pose: tuple[float, float, float, float, float, float] | None = None
         self._pick_approach: tuple[float, float, float, float, float, float] | None = None
         self._place_approach: tuple[float, float, float, float, float, float] | None = None
+        self._need_direct_scan = True
 
     @property
     def state(self) -> State:
@@ -286,8 +287,13 @@ class PickPlaceFSM:
 
     def _do_scan_global(self) -> bool:
         print("[SCAN_GLOBAL] 扫描 24 槽...")
-        from_pose = self._last_pose or self._planner.scan_pose
-        waypoints = self._planner.plan_to_scan(from_pose)
+        if self._need_direct_scan:
+            # 冷启动：从当前任意姿态直达 scan_pose，避免先抬 Z 导致不可达
+            waypoints = self._planner.plan_to_scan(None)
+            self._need_direct_scan = False
+        else:
+            from_pose = self._last_pose or self._planner.scan_pose
+            waypoints = self._planner.plan_to_scan(from_pose)
         self._execute_waypoints(waypoints, phase="scan")
 
         self._arm.wait_motion_done()
@@ -565,14 +571,47 @@ class PickPlaceFSM:
         *,
         label: str,
     ) -> None:
-        print(f"  move_p [{label}] z={pose[2]:.1f}")
+        print(
+            f"  move_p [{label}] "
+            f"xyz=({pose[0]:.1f},{pose[1]:.1f},{pose[2]:.1f}) "
+            f"rpy=({pose[3]:.3f},{pose[4]:.3f},{pose[5]:.3f})"
+        )
         self._viz.start_live()
         try:
-            self._arm.move_p(pose, speed=speed, block=True)
-            if not self._arm.wait_motion_done():
+            self._arm.move_p(pose, speed=speed, block=False)
+            deadline = time.monotonic() + 120.0
+            stable_since: float | None = None
+            while time.monotonic() < deadline:
+                self._viz.tick_live()
+                if self._near_pose(pose):
+                    now = time.monotonic()
+                    if stable_since is None:
+                        stable_since = now
+                    elif now - stable_since >= 0.25:
+                        break
+                else:
+                    stable_since = None
+                time.sleep(0.05)
+            else:
                 raise FSMError(f"move_p [{label}] 超时未到位")
         finally:
             self._viz.stop_live()
+
+    def _near_pose(
+        self,
+        target: tuple[float, float, float, float, float, float],
+        *,
+        tol_mm: float = 1.0,
+        tol_rad: float = 0.02,
+    ) -> bool:
+        cur = self._arm.get_pose_6d()
+        for i in range(3):
+            if abs(cur[i] - target[i]) > tol_mm:
+                return False
+        for i in range(3, 6):
+            if abs(cur[i] - target[i]) > tol_rad:
+                return False
+        return True
 
     def _refine_match_params(self) -> tuple[float, float]:
         """精定位 XY 匹配半径与歧义最小差距（mm），来自 config registry。"""
