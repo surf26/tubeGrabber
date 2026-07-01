@@ -8,7 +8,7 @@ from typing import Any
 
 from drivers.arm_driver import ArmDriver
 from drivers.camera_driver import CameraDriver
-from drivers.gripper_driver import GripperDriver
+from drivers.gripper_driver import GripperDriver, GripperDriverError
 from perception.coord_transform import load_T_ee_cam, load_intrinsics, pose_6d_to_matrix
 from perception.refine import refine_pick_slot, refine_place_slot
 from perception.slot_mapper import SlotMapper
@@ -70,7 +70,8 @@ class PickPlaceFSM:
         self._validator = validator
         self._config = config
         self._dry_run = dry_run
-        self._skip_gripper = skip_gripper or dry_run
+        gripper_enabled = config.get("gripper", {}).get("enabled", True)
+        self._skip_gripper = skip_gripper or dry_run or not gripper_enabled
 
         self._cam_cfg = config["camera"]
         self._arm_cfg = config["arm"]
@@ -268,10 +269,17 @@ class PickPlaceFSM:
         self._camera.connect()
         self._viz.bind_camera(self._camera)
         if not self._skip_gripper:
-            if self._gripper is None:
-                self._gripper = GripperDriver(self._arm, self._config["gripper"])
-            self._gripper.setup_modbus()
-            self._gripper.open()
+            try:
+                if self._gripper is None:
+                    self._gripper = GripperDriver(self._arm, self._config["gripper"])
+                self._gripper.setup_modbus()
+                self._gripper.open()
+            except GripperDriverError as exc:
+                print(f"[CHECK_HW] 夹爪连接失败，已跳过夹爪: {exc}")
+                self._skip_gripper = True
+                self._gripper = None
+        else:
+            print("[CHECK_HW] 已配置跳过夹爪")
         self._last_pose = self._arm.get_pose_6d()
         print("[CHECK_HW] OK")
         return True

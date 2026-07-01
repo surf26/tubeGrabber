@@ -15,6 +15,7 @@ import argparse
 import sys
 
 from tasks.fsm_factory import build_pick_place_fsm
+from utils.config_loader import load_config
 
 
 HELP_TEXT = """
@@ -47,6 +48,7 @@ def _run_interactive(fsm, *, skip_gripper: bool) -> int:
     if not _confirm_start():
         return 130
     if not fsm.connect_and_scan():
+        print(f"启动失败: {fsm.fail_reason}")
         return 1
 
     print(HELP_TEXT)
@@ -124,7 +126,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    skip_gripper = args.no_gripper
+    skip_gripper = args.no_gripper or not load_config().get("gripper", {}).get("enabled", True)
     fsm = build_pick_place_fsm(dry_run=False, skip_gripper=skip_gripper)
 
     try:
@@ -136,6 +138,7 @@ def main() -> int:
 
         if args.command == "scan":
             if not fsm.connect_and_scan():
+                print(f"扫描失败: {fsm.fail_reason}")
                 return 1
             _print_table(fsm)
             return 0

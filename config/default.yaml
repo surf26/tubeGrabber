@@ -16,6 +16,7 @@ camera:
   depth_max_mm: 800
 
 gripper:
+  enabled: false             # false / --no-gripper：不连夹爪，抓放只走臂+视觉
   modbus_port: 1             # 末端 RS485，睿尔曼 JSON 协议 port=1
   device_id: 1               # 夹爪 Modbus 从站地址，首次联调后按实际修改
   baudrate: 9600             # 与旧项目一致；四代机用 rm_set_tool_rs485_mode
