@@ -4,8 +4,8 @@
 arm:
   ip: "192.168.1.18"
   port: 8080
-  default_speed: 20          # SDK 速度单位，调试阶段先慢
-  approach_speed: 10           # 靠近试管架时更慢
+  default_speed:   5       # SDK 速度单位，调试阶段先慢
+  approach_speed: 1          # 靠近试管架时更慢
 
 camera:
   serial: "CP84B4100090"
@@ -16,29 +16,33 @@ camera:
   depth_max_mm: 800
 
 gripper:
-  enabled: false             # false / --no-gripper：不连夹爪，抓放只走臂+视觉
-  modbus_port: 1             # 末端 RS485，睿尔曼 JSON 协议 port=1
+  enabled: true              # false / --no-gripper：不连夹爪，抓放只走臂+视觉
+  backend: "realman_sdk"     # realman_sdk：rm_set_rm_plus_mode + rm_set_gripper_position
+  modbus_port: 1             # legacy_modbus 后端使用
   device_id: 1               # 夹爪 Modbus 从站地址，首次联调后按实际修改
-  baudrate: 9600             # 与旧项目一致；四代机用 rm_set_tool_rs485_mode
+  baudrate: 115200           # RM Plus 夹爪协议，见 grasp_demo/sdk_demo
   tool_voltage: 3            # 3 = 工具端 24V，夹爪上电必需
-  full_stroke: 256000
-  open_position: 256000      # 张开目标步数
-  close_position: 0          # 闭合目标步数（0 = 全闭）
+  full_stroke: 1000
+  open_position: 120         # 通用张开位置；SDK 夹爪位置：0=全闭, 1000=全开
+  pick_open_position: 115    # 抓取前张开，刚好套住试管
+  release_open_position: 120 # 放置时伸进孔后松开，提起时保持此开度
+  close_position: 0          # SDK 夹爪位置：0 = 全闭
   zero_speed: 25600          # 寄存器 36：找零速度
   init_speed: 51200          # 寄存器 38：初始速度
   run_speed: 51200           # 寄存器 40：运行速度
   # 法兰 → 夹爪 TCP（指尖/抓取中心），末端坐标系下平移 mm；视觉 base_xyz 为 TCP 目标点
-  tcp_offset_mm: [0, 0, -220]   # 实测：法兰原点到夹爪指尖，常见为 ee -Z 方向负值
+  tcp_offset_mm: [0, 0, 220]   # 法兰→夹爪 TCP（ee 系）；当前竖直姿态下应生成正的法兰 Z
   reg_zero_speed: 36
   reg_init_speed: 38
   reg_run_speed: 40
   reg_command: 43            # 写目标位置
   # reg_position_feedback:     # 若有位置反馈寄存器可取消注释
   modbus_timeout: 2            # rm_set_modbus_mode 超时，单位 100ms（三代机回退用）
-  init_close_wait_s: 5.0       # 初始化写闭合位后等待找零
+  init_close_wait_s: 2.0       # 初始化闭合到默认态后等待
   position_reg_count: 2        # 位置占 2 个 16 位寄存器（32 位步数）
   move_timeout_s: 5.0
-  position_tolerance: 500      # 到位容差（步）
+  settle_s: 0.3
+  position_tolerance: 20       # legacy_modbus 反馈容差；SDK 后端通常无位置反馈
 
 yolo:
   model_path: "data/models/best.pt"
@@ -51,7 +55,7 @@ yolo:
 vision:
   refine_conf_threshold: 0.6   # 精定位时可比全局扫描更严
   display_enabled: true         # imshow 总开关
-  live_preview_enabled: true   # 臂移动时 camera_live；若 scan_view 黑屏可改 false
+  live_preview_enabled: false  # 臂移动时 camera_live；现场优先保证 scan/refine 取流稳定
   scan_imshow_wait_ms: 0        # 0=按键继续，>0 自动停留毫秒
   refine_imshow_wait_ms: 0
   live_preview_fps: 15          # 臂移动时相机预览帧率（无 YOLO）
@@ -59,9 +63,9 @@ vision:
 
 motion:
   approach_height_mm: 50       # 精定位前停在目标上方 5 cm
-  pick_insert_mm: 25           # 抓取下降深度，实测调整
+  pick_insert_mm: 5         # 抓取下降深度 2cm，实测调整
   pick_retreat_mm: 100         # 夹取后上提 10 cm
-  place_insert_mm: 20          # 放置插入深度
+  place_insert_mm: 10         # 放置插入深度
   place_retreat_mm: 100        # 放置后上提高度
 
 poses:

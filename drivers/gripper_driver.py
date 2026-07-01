@@ -23,14 +23,17 @@ class GripperDriver:
             raise GripperDriverError("ArmDriver 未连接，请先 arm.connect()")
 
         self._arm = arm
+        self._backend = str(config.get("backend", "realman_sdk")).lower()
         self._device = int(config["device_id"])
         self._baudrate = int(config["baudrate"])
         self._modbus_timeout = int(config.get("modbus_timeout", 2))  # 单位 100ms
         self._tool_voltage = int(config.get("tool_voltage", 3))  # 3 = 24V
 
         self._open_pos = int(config["open_position"])
+        self._pick_open_pos = int(config.get("pick_open_position", self._open_pos))
+        self._release_open_pos = int(config.get("release_open_position", self._open_pos))
         self._close_pos = int(config["close_position"])
-        self._full_stroke = int(config.get("full_stroke", 256000))
+        self._full_stroke = int(config.get("full_stroke", 1000))
 
         self._reg_zero_speed = int(config.get("reg_zero_speed", config.get("reg_position", 36)))
         self._reg_init_speed = int(config.get("reg_init_speed", config.get("reg_speed", 38)))
@@ -46,13 +49,50 @@ class GripperDriver:
         self._init_close_wait_s = float(config.get("init_close_wait_s", 5.0))
         self._move_timeout_s = float(config.get("move_timeout_s", 5.0))
         self._position_tolerance = int(config.get("position_tolerance", 500))
+        self._settle_s = float(config.get("settle_s", 0.3))
 
         self._modbus_ready = False
         self._use_tool_rtu_api = True
         self._current_position = self._close_pos
 
     def setup_modbus(self) -> None:
-        """配置工具端 RS485、写入速度参数并闭合夹爪找零。"""
+        """初始化夹爪通信，并闭合到默认状态。"""
+        if self._backend in ("realman_sdk", "sdk", "rm_plus"):
+            self._setup_realman_sdk()
+            return
+
+        self._setup_legacy_modbus()
+
+    def _setup_realman_sdk(self) -> None:
+        """按 Realman 官方 SDK 夹爪接口初始化：上电 + RM Plus 协议。"""
+        robot = self._arm.get_robot()
+
+        ret = robot.rm_set_tool_voltage(self._tool_voltage)
+        if ret != 0:
+            raise GripperDriverError(f"rm_set_tool_voltage 失败，SDK 错误码: {ret}")
+        time.sleep(0.5)
+
+        if not hasattr(robot, "rm_set_rm_plus_mode"):
+            raise GripperDriverError("当前 SDK 缺少 rm_set_rm_plus_mode，无法使用 realman_sdk 夹爪后端")
+        ret = robot.rm_set_rm_plus_mode(self._baudrate)
+        if ret != 0:
+            raise GripperDriverError(
+                f"rm_set_rm_plus_mode 失败，SDK 错误码: {ret} (baudrate={self._baudrate})"
+            )
+        time.sleep(0.3)
+
+        # 非阻塞闭合到默认态；已闭合时部分 SDK/固件会返回 1 或 -4，按 demo 视为可继续。
+        self._sdk_set_position(self._close_pos, wait=False, timeout_s=self._move_timeout_s, already_closed_ok=True)
+        time.sleep(self._init_close_wait_s)
+
+        if hasattr(robot, "rm_clear_system_err"):
+            robot.rm_clear_system_err()
+
+        self._current_position = self._close_pos
+        self._modbus_ready = True
+
+    def _setup_legacy_modbus(self) -> None:
+        """旧版：配置工具端 RS485，并按寄存器协议控制夹爪。"""
         robot = self._arm.get_robot()
 
         ret = robot.rm_set_tool_voltage(self._tool_voltage)
@@ -76,8 +116,11 @@ class GripperDriver:
         self._modbus_ready = True
 
     def get_position(self) -> int:
-        """返回夹爪当前位置（步数）。优先读反馈寄存器，否则返回上次目标位置。"""
+        """返回夹爪当前位置。SDK 后端无反馈时返回上次目标位置。"""
         self._require_modbus()
+        if self._backend in ("realman_sdk", "sdk", "rm_plus"):
+            return self._current_position
+
         if self._reg_feedback is not None:
             try:
                 pos = self._read_register(int(self._reg_feedback), self._position_reg_count)
@@ -88,10 +131,17 @@ class GripperDriver:
         return self._current_position
 
     def move_to(self, position: int, *, wait: bool = True) -> bool:
-        """写入目标位置到命令寄存器。"""
+        """移动夹爪到目标位置。realman_sdk 后端位置范围为 0..1000。"""
         self._require_modbus()
         position = max(0, min(int(position), self._full_stroke))
         from_pos = self._current_position
+
+        if self._backend in ("realman_sdk", "sdk", "rm_plus"):
+            self._sdk_set_position(position, wait=wait, timeout_s=self._move_timeout_s)
+            self._current_position = position
+            if self._settle_s > 0:
+                time.sleep(self._settle_s)
+            return True
 
         self._write_register(self._reg_command, position)
         self._current_position = position
@@ -107,6 +157,14 @@ class GripperDriver:
         """张开夹爪。"""
         return self.move_to(self._open_pos, wait=wait)
 
+    def open_for_pick(self, *, wait: bool = True) -> bool:
+        """抓取前张开到试管套入开度。"""
+        return self.move_to(self._pick_open_pos, wait=wait)
+
+    def open_for_release(self, *, wait: bool = True) -> bool:
+        """放置时松开到释放开度。"""
+        return self.move_to(self._release_open_pos, wait=wait)
+
     def close(self, *, wait: bool = True) -> bool:
         """闭合夹爪。"""
         return self.move_to(self._close_pos, wait=wait)
@@ -114,6 +172,29 @@ class GripperDriver:
     def is_ready(self) -> bool:
         """Modbus 已配置且初始化完成。"""
         return self._modbus_ready
+
+    def _sdk_set_position(
+        self,
+        position: int,
+        *,
+        wait: bool,
+        timeout_s: float,
+        already_closed_ok: bool = False,
+    ) -> None:
+        robot = self._arm.get_robot()
+        if not hasattr(robot, "rm_set_gripper_position"):
+            raise GripperDriverError("当前 SDK 缺少 rm_set_gripper_position")
+
+        timeout = max(0, int(round(timeout_s)))
+        ret = robot.rm_set_gripper_position(int(position), bool(wait), timeout)
+        if ret == 0:
+            return
+        if already_closed_ok and int(position) == self._close_pos and ret in (1, -4):
+            return
+        raise GripperDriverError(
+            f"rm_set_gripper_position({position}, wait={wait}, timeout={timeout}) "
+            f"失败，SDK 错误码: {ret}"
+        )
 
     def _setup_rs485(self, robot) -> bool:
         """配置工具端 RS485；优先第四代 rm_set_tool_rs485_mode，失败则回退 rm_set_modbus_mode。"""

@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 from utils.opencv_gui import cv2
@@ -207,6 +208,7 @@ class VisionDisplay:
         self._preview_fps = float(vis.get("live_preview_fps", 15))
         self._preview: CameraPreview | None = None
         self._camera = None
+        self._capture_dir = Path("data/captures")
 
     @property
     def enabled(self) -> bool:
@@ -226,10 +228,11 @@ class VisionDisplay:
         self.stop_live()
         self._hide_live_window()
         img = np.ascontiguousarray(bgr)
+        self._save_view("latest_scan_view.png", img)
         cv2.namedWindow("scan_view", cv2.WINDOW_NORMAL)
         cv2.imshow("scan_view", img)
         cv2.resizeWindow("scan_view", img.shape[1], img.shape[0])
-        cv2.waitKey(1)
+        cv2.waitKey(50)
         self._wait("scan_view", self._scan_wait_ms)
 
     def show_refine(self, bgr: np.ndarray) -> None:
@@ -238,10 +241,11 @@ class VisionDisplay:
         self.stop_live()
         self._hide_live_window()
         img = np.ascontiguousarray(bgr)
+        self._save_view("latest_refine_view.png", img)
         cv2.namedWindow("refine_view", cv2.WINDOW_NORMAL)
         cv2.imshow("refine_view", img)
         cv2.resizeWindow("refine_view", img.shape[1], img.shape[0])
-        cv2.waitKey(1)
+        cv2.waitKey(50)
         self._wait("refine_view", self._refine_wait_ms)
 
     def start_live(self) -> None:
@@ -266,6 +270,15 @@ class VisionDisplay:
     def close_all(self) -> None:
         self.stop_live()
         cv2.destroyAllWindows()
+
+    def _save_view(self, filename: str, img: np.ndarray) -> None:
+        try:
+            self._capture_dir.mkdir(parents=True, exist_ok=True)
+            path = self._capture_dir / filename
+            cv2.imwrite(str(path), img)
+            print(f"[viewer] 已保存 {path}")
+        except Exception as exc:
+            print(f"[viewer] 保存图像失败: {exc}")
 
     @staticmethod
     def _wait(window: str, wait_ms: int) -> None:
