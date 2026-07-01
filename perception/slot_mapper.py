@@ -7,7 +7,11 @@ from typing import Any
 
 import numpy as np
 
-from perception.coord_transform import CoordTransformError, pixel_to_base_mm
+from perception.coord_transform import (
+    CoordTransformError,
+    pixel_to_base_mm,
+    pixel_uv_to_rack_plane_mm,
+)
 from perception.yolo_detector import Detection
 from utils.config_loader import load_yaml
 
@@ -50,6 +54,9 @@ class SlotMapper:
         self._left_cols = [int(c) for c in self._rack["left_col_order"]]
         self._right_rows = [str(r) for r in self._rack["right_row_order"]]
         self._right_cols = [int(c) for c in self._rack["right_col_order"]]
+        self._tube_above_rack_mm = float(self._rack.get("tube_above_rack_mm", 30.0))
+        default_z = self._rack.get("default_rack_plane_z_mm")
+        self._default_rack_z_mm = float(default_z) if default_z is not None else None
 
     def all_slot_ids(self) -> list[str]:
         ids: list[str] = []
@@ -75,7 +82,7 @@ class SlotMapper:
     ) -> dict[str, SlotObservation]:
         """
         将 YOLO 检测映射到 24 个逻辑槽位。
-        若提供 depth + 标定 + 臂姿，则填充 base_xyz。
+        tube：深度图测 base_xyz；empty：pixel_uv + z_rack 平面反投影 XY。
         """
         result = {slot_id: SlotObservation(slot_id=slot_id) for slot_id in self.all_slot_ids()}
         if not detections:
@@ -87,9 +94,63 @@ class SlotMapper:
         left_pts = [p for p in points if p.u < split_u]
         right_pts = [p for p in points if p.u >= split_u]
 
-        self._assign_side(left_pts, "left", result, depth, K, dist, T_ee_cam, T_base_ee, depth_min_mm, depth_max_mm)
-        self._assign_side(right_pts, "right", result, depth, K, dist, T_ee_cam, T_base_ee, depth_min_mm, depth_max_mm)
+        self._assign_side(
+            left_pts, "left", result, depth, K, dist, T_ee_cam, T_base_ee,
+            depth_min_mm, depth_max_mm,
+        )
+        self._assign_side(
+            right_pts, "right", result, depth, K, dist, T_ee_cam, T_base_ee,
+            depth_min_mm, depth_max_mm,
+        )
+
+        if (
+            K is not None
+            and dist is not None
+            and T_ee_cam is not None
+            and T_base_ee is not None
+        ):
+            self._fill_empty_on_rack_plane(result, K, dist, T_ee_cam, T_base_ee)
+
         return result
+
+    def _fill_empty_on_rack_plane(
+        self,
+        result: dict[str, SlotObservation],
+        K: np.ndarray,
+        dist: np.ndarray,
+        T_ee_cam: np.ndarray,
+        T_base_ee: np.ndarray,
+    ) -> None:
+        """empty：用 pixel_uv 与 z_rack 平面求交得到 base_xyz。"""
+        from world.tube_registry import TubeRegistryError, estimate_z_rack
+
+        try:
+            z_rack = estimate_z_rack(
+                result,
+                tube_above_rack_mm=self._tube_above_rack_mm,
+                default_z_mm=self._default_rack_z_mm,
+            )
+        except TubeRegistryError:
+            return
+
+        for slot_id, obs in result.items():
+            if obs.klass != "empty" or obs.pixel_uv is None:
+                continue
+            u, v = obs.pixel_uv
+            try:
+                base_xyz = pixel_uv_to_rack_plane_mm(
+                    u, v, z_rack, K, dist, T_ee_cam, T_base_ee,
+                )
+            except CoordTransformError:
+                continue
+            result[slot_id] = SlotObservation(
+                slot_id=slot_id,
+                klass=obs.klass,
+                confidence=obs.confidence,
+                pixel_uv=obs.pixel_uv,
+                base_xyz=base_xyz,
+                z_source="rack_plane",
+            )
 
     def to_table_str(self, observations: dict[str, SlotObservation]) -> str:
         lines = [f"{'slot_id':<12} {'class':<8} {'conf':>6}  {'uv':<18} {'base_xyz'}", "-" * 70]
@@ -185,6 +246,16 @@ def _detection_to_observation(
     u, v = det.center_uv
     base_xyz = None
     z_source = "missing"
+
+    if det.class_name == "empty":
+        return SlotObservation(
+            slot_id=slot_id,
+            klass=det.class_name,
+            confidence=det.confidence,
+            pixel_uv=(float(u), float(v)),
+            base_xyz=None,
+            z_source="missing",
+        )
 
     if depth is not None and K is not None and dist is not None and T_ee_cam is not None and T_base_ee is not None:
         try:

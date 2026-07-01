@@ -142,6 +142,43 @@ def transform_point(T: np.ndarray, point_xyz: np.ndarray) -> np.ndarray:
     return out[:3]
 
 
+def pixel_uv_to_rack_plane_mm(
+    u: float,
+    v: float,
+    z_rack_mm: float,
+    K: np.ndarray,
+    dist: np.ndarray,
+    T_ee_cam: np.ndarray,
+    T_base_ee: np.ndarray,
+) -> tuple[float, float, float]:
+    """
+    像素射线与基坐标平面 Z=z_rack_mm 求交，返回 (x, y, z_rack_mm)。
+    用于 empty 槽位（孔心无有效深度）。
+    """
+    u_undist, v_undist = undistort_uv(u, v, K, dist)
+    fx, fy = float(K[0, 0]), float(K[1, 1])
+    cx, cy = float(K[0, 2]), float(K[1, 2])
+
+    dir_cam = np.array(
+        [(u_undist - cx) / fx, (v_undist - cy) / fy, 1.0],
+        dtype=np.float64,
+    )
+
+    T_base_cam = T_base_ee @ T_ee_cam
+    origin = T_base_cam[:3, 3]
+    dir_base = T_base_cam[:3, :3] @ dir_cam
+
+    if abs(dir_base[2]) < 1e-9:
+        raise CoordTransformError("视线与架面近平行，无法求交")
+
+    scale = (float(z_rack_mm) - float(origin[2])) / float(dir_base[2])
+    if scale <= 0:
+        raise CoordTransformError("架面在相机后方，无法求交")
+
+    hit = origin + scale * dir_base
+    return float(hit[0]), float(hit[1]), float(z_rack_mm)
+
+
 def pixel_to_base_mm(
     u: float,
     v: float,

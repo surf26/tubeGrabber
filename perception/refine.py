@@ -6,7 +6,11 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from perception.coord_transform import CoordTransformError, pixel_to_base_mm
+from perception.coord_transform import (
+    CoordTransformError,
+    pixel_to_base_mm,
+    pixel_uv_to_rack_plane_mm,
+)
 from perception.yolo_detector import YoloDetector
 from world.tube_registry import TubeRegistry
 
@@ -141,22 +145,33 @@ def refine_slot(
         if det.class_name != expected_klass:
             continue
         try:
-            p_base, _ = pixel_to_base_mm(
-                det.center_uv[0],
-                det.center_uv[1],
-                depth,
-                K,
-                dist,
-                T_ee_cam,
-                T_base_ee,
-                depth_min_mm=depth_min_mm,
-                depth_max_mm=depth_max_mm,
-            )
+            if z_override is not None:
+                meas_x, meas_y, meas_z = pixel_uv_to_rack_plane_mm(
+                    det.center_uv[0],
+                    det.center_uv[1],
+                    float(z_override),
+                    K,
+                    dist,
+                    T_ee_cam,
+                    T_base_ee,
+                )
+            else:
+                p_base, _ = pixel_to_base_mm(
+                    det.center_uv[0],
+                    det.center_uv[1],
+                    depth,
+                    K,
+                    dist,
+                    T_ee_cam,
+                    T_base_ee,
+                    depth_min_mm=depth_min_mm,
+                    depth_max_mm=depth_max_mm,
+                )
+                meas_x, meas_y, meas_z = float(p_base[0]), float(p_base[1]), float(p_base[2])
         except CoordTransformError as exc:
             errors.append(f"uv={det.center_uv}: {exc}")
             continue
 
-        meas_x, meas_y, meas_z = float(p_base[0]), float(p_base[1]), float(p_base[2])
         dist_xy = float(np.hypot(meas_x - exp_x, meas_y - exp_y))
         if dist_xy > max_dist_xy_mm:
             continue

@@ -34,8 +34,7 @@ def estimate_z_rack(
     """
     从当前扫描估计 rack 平面高度（mm）。
     优先：tube 的 base_z 中位数 - tube_above_rack_mm；
-    其次：empty 且有 measured 深度的 base_z 中位数；
-    最后：default_z_mm（由 scripts/calibrate_rack_height.py 标定写入）。
+    其次：default_z_mm（由 scripts/calibrate_rack_height.py 标定写入）。
     """
     tube_zs = [
         o.base_xyz[2]
@@ -44,16 +43,6 @@ def estimate_z_rack(
     ]
     if tube_zs:
         return float(np.median(tube_zs)) - tube_above_rack_mm
-
-    empty_zs = [
-        o.base_xyz[2]
-        for o in observations.values()
-        if o.klass == "empty"
-        and o.base_xyz is not None
-        and o.z_source == "measured"
-    ]
-    if empty_zs:
-        return float(np.median(empty_zs))
 
     if default_z_mm is not None:
         return default_z_mm
