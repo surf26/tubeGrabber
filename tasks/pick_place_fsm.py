@@ -166,11 +166,19 @@ class PickPlaceFSM:
 
     def run_dry_move(self, cmd_text: str) -> bool:
         """空跑：移动 + 精定位，不夹取。"""
-        if not self._bootstrap():
-            return False
-        print(self._registry.to_table_str())
-        print()
-        return self.execute_move(cmd_text, dry=True)
+        was_dry = self._dry_run
+        was_skip = self._skip_gripper
+        self._dry_run = True
+        self._skip_gripper = True
+        try:
+            if not self._bootstrap():
+                return False
+            print(self._registry.to_table_str())
+            print()
+            return self.execute_move(cmd_text, dry=True)
+        finally:
+            self._dry_run = was_dry
+            self._skip_gripper = was_skip
 
     def run_once(self, cmd_text: str) -> bool:
         """完整抓放（非 dry-run）。"""
@@ -274,9 +282,14 @@ class PickPlaceFSM:
                 if self._gripper is None:
                     self._gripper = GripperDriver(self._arm, self._config["gripper"])
                 self._gripper.setup_modbus()
-                self._gripper.open()
+                print("[CHECK_HW] 夹爪闭合到 0")
+                self._gripper.close()
+                print("[CHECK_HW] 夹爪已初始化为默认闭合态")
             except GripperDriverError as exc:
-                print(f"[CHECK_HW] 夹爪连接失败，已跳过夹爪: {exc}")
+                if not self._dry_run:
+                    self._fail(f"夹爪连接失败: {exc}")
+                    return False
+                print(f"[CHECK_HW] 夹爪连接失败，dry-run 已跳过夹爪: {exc}")
                 self._skip_gripper = True
                 self._gripper = None
         else:
@@ -367,46 +380,69 @@ class PickPlaceFSM:
         time.sleep(0.2)
         self._viz.stop_live()
         frame = self._camera.capture()
-        pose_6d = self._arm.get_pose_6d()
-        T_base_ee = pose_6d_to_matrix(pose_6d)
 
-        max_dist, ambiguity_delta = self._refine_match_params()
-        result = refine_pick_slot(
-            self._cmd.src,
-            self._registry,
-            frame.color,
-            frame.depth,
-            self._refine_detector,
-            self._K,
-            self._dist,
-            self._T_ee_cam,
-            T_base_ee,
-            max_dist_xy_mm=max_dist,
-            ambiguity_min_delta_mm=ambiguity_delta,
-            depth_min_mm=self._cam_cfg.get("depth_min_mm", 100),
-            depth_max_mm=self._cam_cfg.get("depth_max_mm", 800),
-        )
-        print(
-            f"  refine dist_xy={result.dist_xy_mm:.2f}mm "
-            f"base=({result.base_xyz[0]:.1f},{result.base_xyz[1]:.1f},{result.base_xyz[2]:.1f})"
-        )
-        self._registry.update_slot(
-            self._cmd.src,
-            base_xyz=result.base_xyz,
-            pixel_uv=result.pixel_uv,
-            confidence=result.confidence,
-            z_source=result.z_source,
-        )
+        detections = self._refine_detector.detect(frame.color)
         refine_vis = draw_refine_annotation(
             frame.color,
-            self._refine_detector.detect(frame.color),
+            detections,
             self._cmd.src,
-            result,
-            title="PICK_REFINE",
+            None,
+            title="PICK_REFINE_DETECT_ONLY",
             font_scale=self._font_scale,
         )
         self._viz.show_refine(refine_vis)
-        approach = self._planner.build_approach_pose(result.base_xyz)
+
+        src = self._registry.get(self._cmd.src)
+        if src.base_xyz is None:
+            self._fail(f"{self._cmd.src} 缺少全局扫描 base_xyz，无法生成 pick approach")
+            return False
+        print(
+            f"  refine 坐标修正已注释，使用全局扫描 base="
+            f"({src.base_xyz[0]:.1f},{src.base_xyz[1]:.1f},{src.base_xyz[2]:.1f})"
+        )
+        approach = self._planner.build_approach_pose(src.base_xyz)
+
+        # 二次精定位坐标修正暂时注释：保留检测显示，但不更新 registry / approach。
+        # pose_6d = self._arm.get_pose_6d()
+        # T_base_ee = pose_6d_to_matrix(pose_6d)
+        #
+        # max_dist, ambiguity_delta = self._refine_match_params()
+        # result = refine_pick_slot(
+        #     self._cmd.src,
+        #     self._registry,
+        #     frame.color,
+        #     frame.depth,
+        #     self._refine_detector,
+        #     self._K,
+        #     self._dist,
+        #     self._T_ee_cam,
+        #     T_base_ee,
+        #     max_dist_xy_mm=max_dist,
+        #     ambiguity_min_delta_mm=ambiguity_delta,
+        #     depth_min_mm=self._cam_cfg.get("depth_min_mm", 100),
+        #     depth_max_mm=self._cam_cfg.get("depth_max_mm", 800),
+        # )
+        # print(
+        #     f"  refine dist_xy={result.dist_xy_mm:.2f}mm "
+        #     f"base=({result.base_xyz[0]:.1f},{result.base_xyz[1]:.1f},{result.base_xyz[2]:.1f})"
+        # )
+        # self._registry.update_slot(
+        #     self._cmd.src,
+        #     base_xyz=result.base_xyz,
+        #     pixel_uv=result.pixel_uv,
+        #     confidence=result.confidence,
+        #     z_source=result.z_source,
+        # )
+        # refine_vis = draw_refine_annotation(
+        #     frame.color,
+        #     self._refine_detector.detect(frame.color),
+        #     self._cmd.src,
+        #     result,
+        #     title="PICK_REFINE",
+        #     font_scale=self._font_scale,
+        # )
+        # self._viz.show_refine(refine_vis)
+        # approach = self._planner.build_approach_pose(result.base_xyz)
         self._move_pose(approach, self._arm_cfg["approach_speed"], label="pick_approach")
         self._pick_approach = approach
         self._last_pose = approach
@@ -425,9 +461,13 @@ class PickPlaceFSM:
         if self._gripper is None:
             self._fail("无夹爪")
             return False
-        self._gripper.open()
+        if not self._confirm("确认夹取姿态安全，按 Enter 开始夹取（Ctrl+C 取消）..."):
+            return False
+        print("[PICK_GRASP] 夹爪张开到 115")
+        self._gripper.open_for_pick()
         insert = self._planner.build_pick_insert_pose(self._pick_approach)
         self._move_pose(insert, self._arm_cfg["approach_speed"], label="pick_insert")
+        print("[PICK_GRASP] 夹爪闭合到 0")
         self._gripper.close()
         retreat = self._planner.build_retreat_pose(
             insert,
@@ -473,46 +513,69 @@ class PickPlaceFSM:
         time.sleep(0.2)
         self._viz.stop_live()
         frame = self._camera.capture()
-        pose_6d = self._arm.get_pose_6d()
-        T_base_ee = pose_6d_to_matrix(pose_6d)
 
-        max_dist, ambiguity_delta = self._refine_match_params()
-        result = refine_place_slot(
-            self._cmd.dst,
-            self._registry,
-            frame.color,
-            frame.depth,
-            self._refine_detector,
-            self._K,
-            self._dist,
-            self._T_ee_cam,
-            T_base_ee,
-            max_dist_xy_mm=max_dist,
-            ambiguity_min_delta_mm=ambiguity_delta,
-            depth_min_mm=self._cam_cfg.get("depth_min_mm", 100),
-            depth_max_mm=self._cam_cfg.get("depth_max_mm", 800),
-        )
-        print(
-            f"  refine dist_xy={result.dist_xy_mm:.2f}mm "
-            f"base=({result.base_xyz[0]:.1f},{result.base_xyz[1]:.1f},{result.base_xyz[2]:.1f})"
-        )
-        self._registry.update_slot(
-            self._cmd.dst,
-            base_xyz=result.base_xyz,
-            pixel_uv=result.pixel_uv,
-            confidence=result.confidence,
-            z_source=result.z_source,
-        )
+        detections = self._refine_detector.detect(frame.color)
         refine_vis = draw_refine_annotation(
             frame.color,
-            self._refine_detector.detect(frame.color),
+            detections,
             self._cmd.dst,
-            result,
-            title="PLACE_REFINE",
+            None,
+            title="PLACE_REFINE_DETECT_ONLY",
             font_scale=self._font_scale,
         )
         self._viz.show_refine(refine_vis)
-        approach = self._planner.build_approach_pose(result.base_xyz)
+
+        dst = self._registry.get(self._cmd.dst)
+        if dst.base_xyz is None:
+            self._fail(f"{self._cmd.dst} 缺少全局扫描 base_xyz，无法生成 place approach")
+            return False
+        print(
+            f"  refine 坐标修正已注释，使用全局扫描 base="
+            f"({dst.base_xyz[0]:.1f},{dst.base_xyz[1]:.1f},{dst.base_xyz[2]:.1f})"
+        )
+        approach = self._planner.build_approach_pose(dst.base_xyz)
+
+        # 二次精定位坐标修正暂时注释：保留检测显示，但不更新 registry / approach。
+        # pose_6d = self._arm.get_pose_6d()
+        # T_base_ee = pose_6d_to_matrix(pose_6d)
+        #
+        # max_dist, ambiguity_delta = self._refine_match_params()
+        # result = refine_place_slot(
+        #     self._cmd.dst,
+        #     self._registry,
+        #     frame.color,
+        #     frame.depth,
+        #     self._refine_detector,
+        #     self._K,
+        #     self._dist,
+        #     self._T_ee_cam,
+        #     T_base_ee,
+        #     max_dist_xy_mm=max_dist,
+        #     ambiguity_min_delta_mm=ambiguity_delta,
+        #     depth_min_mm=self._cam_cfg.get("depth_min_mm", 100),
+        #     depth_max_mm=self._cam_cfg.get("depth_max_mm", 800),
+        # )
+        # print(
+        #     f"  refine dist_xy={result.dist_xy_mm:.2f}mm "
+        #     f"base=({result.base_xyz[0]:.1f},{result.base_xyz[1]:.1f},{result.base_xyz[2]:.1f})"
+        # )
+        # self._registry.update_slot(
+        #     self._cmd.dst,
+        #     base_xyz=result.base_xyz,
+        #     pixel_uv=result.pixel_uv,
+        #     confidence=result.confidence,
+        #     z_source=result.z_source,
+        # )
+        # refine_vis = draw_refine_annotation(
+        #     frame.color,
+        #     self._refine_detector.detect(frame.color),
+        #     self._cmd.dst,
+        #     result,
+        #     title="PLACE_REFINE",
+        #     font_scale=self._font_scale,
+        # )
+        # self._viz.show_refine(refine_vis)
+        # approach = self._planner.build_approach_pose(result.base_xyz)
         self._move_pose(approach, self._arm_cfg["approach_speed"], label="place_approach")
         self._place_approach = approach
         self._last_pose = approach
@@ -533,7 +596,8 @@ class PickPlaceFSM:
             return False
         insert = self._planner.build_place_insert_pose(self._place_approach)
         self._move_pose(insert, self._arm_cfg["approach_speed"], label="place_insert")
-        self._gripper.open()
+        print("[PLACE_RELEASE] 夹爪张开到 120")
+        self._gripper.open_for_release()
         retreat = self._planner.build_retreat_pose(
             insert,
             float(self._motion.get("place_retreat_mm", 100)),
@@ -562,6 +626,17 @@ class PickPlaceFSM:
     def _do_done(self) -> bool:
         print("[DONE]")
         return True
+
+    def _confirm(self, message: str) -> bool:
+        print(message)
+        try:
+            input()
+            return True
+        except KeyboardInterrupt:
+            self._fail("用户取消")
+            return False
+        except EOFError:
+            return True
 
     def _execute_waypoints(self, waypoints: list[Waypoint], *, phase: str) -> None:
         for wp in waypoints:

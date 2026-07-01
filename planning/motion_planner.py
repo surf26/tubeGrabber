@@ -83,11 +83,16 @@ class MotionPlanner:
             ]
 
         waypoints: list[Waypoint] = []
-        safe = self._raise_pose(from_pose, self._transit_z_offset_mm)
-        waypoints.append(Waypoint("raise_to_transit", safe, speed=self._default_speed))
+        region = self._right_region if from_pose[0] >= 0 else self._left_region
+        side = "right" if from_pose[0] >= 0 else "left"
 
-        scan_at_safe = _with_z(self._scan_pose, safe[2])
-        if not _xyz_close(scan_at_safe, safe):
+        region_entry = _with_z(region, max(from_pose[2], region[2]))
+        waypoints.append(
+            Waypoint(f"{side}_region_return", region_entry, speed=self._default_speed)
+        )
+
+        scan_at_safe = _with_z(self._scan_pose, max(region_entry[2], self._scan_pose[2]))
+        if not _xyz_close(scan_at_safe, region_entry):
             waypoints.append(
                 Waypoint("move_above_scan", scan_at_safe, speed=self._default_speed)
             )
@@ -113,7 +118,11 @@ class MotionPlanner:
         approach = self.build_approach_pose(slot.base_xyz, self._approach_height_mm)
 
         waypoints: list[Waypoint] = []
-        safe = self._raise_pose(from_pose, self._transit_z_offset_mm)
+        safe = self._transit_pose(
+            from_pose,
+            region[2],
+            approach[2],
+        )
         waypoints.append(
             Waypoint(f"{slot.slot_id}_raise", safe, speed=self._default_speed)
         )
@@ -126,7 +135,10 @@ class MotionPlanner:
             Waypoint(f"{side}_region", region, speed=self._approach_speed)
         )
 
-        above_slot = _with_z(approach, safe[2])
+        # Keep the slot approach at the local work height. Reusing the scan
+        # height here can make far rack positions unreachable with the vertical
+        # grasp posture.
+        above_slot = _with_z(approach, max(region[2], approach[2]))
         waypoints.append(
             Waypoint(f"{slot.slot_id}_above", above_slot, speed=self._default_speed)
         )
@@ -220,6 +232,22 @@ class MotionPlanner:
     ) -> tuple[float, float, float, float, float, float]:
         x, y, z, rx, ry, rz = pose
         return (x, y, z + float(offset_mm), rx, ry, rz)
+
+    def _transit_pose(
+        self,
+        from_pose: tuple[float, float, float, float, float, float],
+        *clearance_z_values: float,
+    ) -> tuple[float, float, float, float, float, float]:
+        """
+        Build a conservative transit pose without blindly adding height.
+
+        The scan pose is already a high camera pose on this setup; adding another
+        transit offset can exceed the arm workspace. Keep the current height when
+        it already clears the next segment, otherwise raise only as much as needed.
+        """
+        x, y, z, rx, ry, rz = from_pose
+        safe_z = max(float(z), *(float(v) for v in clearance_z_values))
+        return (x, y, safe_z, rx, ry, rz)
 
 
 def _load_pose_list(path: str) -> list[float]:
