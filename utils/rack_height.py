@@ -195,6 +195,9 @@ def pick_rack_plane_z_interactive(
 
     _redraw()
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.imshow(window_name, canvas)
+    # 须先 imshow 创建窗口，再注册鼠标回调（否则 Linux 上 null window handler）
+    cv2.waitKey(1)
     cv2.setMouseCallback(window_name, _on_mouse)
 
     result: tuple[float, list[RackClickSample]] | None = None
@@ -241,5 +244,8 @@ def pick_rack_plane_z_interactive(
             print("已取消")
             break
 
-    cv2.destroyWindow(window_name)
+    try:
+        cv2.destroyWindow(window_name)
+    except cv2.error:
+        pass
     return result
