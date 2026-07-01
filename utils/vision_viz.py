@@ -9,9 +9,9 @@ from typing import Any
 import cv2
 import numpy as np
 
+from perception.detection import Detection
 from perception.refine import RefineResult
 from perception.slot_mapper import SlotMapper, SlotObservation
-from perception.yolo_detector import Detection
 
 
 _COLORS = {

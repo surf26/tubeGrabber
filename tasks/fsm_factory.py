@@ -56,7 +56,15 @@ def build_pick_place_fsm(
     refine_detector.load()
 
     rack = load_yaml(cfg["calib"]["rack_layout"])
-    mapper = SlotMapper(rack_config=rack, image_width=cfg["camera"]["width"])
+    mapper_cfg = cfg.get("mapper", {})
+    mapper = SlotMapper(
+        rack_config=rack,
+        image_width=cfg["camera"]["width"],
+        method=mapper_cfg.get("method", "lattice"),
+        residual_max_ratio=float(mapper_cfg.get("residual_max_ratio", 0.35)),
+        min_points_for_fit=int(mapper_cfg.get("min_points_for_fit", 6)),
+        side_max_count=int(mapper_cfg.get("side_max_count", 12)),
+    )
     registry = TubeRegistry(mapper.all_slot_ids())
     planner = MotionPlanner.from_config(cfg)
     validator = CommandValidator(registry.slot_ids())

@@ -103,7 +103,7 @@ def main() -> int:
             print("使用 scan_pose.json 作为臂姿（离线近似）")
         T_base_ee = pose_6d_to_matrix(pose_6d)
 
-    observations = mapper.map(
+    observations, z_rack_est = mapper.map(
         detections,
         depth,
         K=K,
@@ -112,23 +112,20 @@ def main() -> int:
         T_base_ee=T_base_ee,
         depth_min_mm=cam_cfg.get("depth_min_mm", 100),
         depth_max_mm=cam_cfg.get("depth_max_mm", 800),
+        tube_above_rack_mm=float(rack_layout.get("tube_above_rack_mm", 30)),
+        default_z_rack_mm=rack_layout.get("default_rack_plane_z_mm"),
     )
 
     if args.z_rack is not None:
         z_rack = args.z_rack
         print(f"使用手动 z_rack = {z_rack:.1f} mm")
+    elif z_rack_est is not None:
+        z_rack = z_rack_est
+        print(f"估计 z_rack = {z_rack:.1f} mm")
     else:
-        try:
-            z_rack = estimate_z_rack(
-                observations,
-                tube_above_rack_mm=float(rack_layout.get("tube_above_rack_mm", 30)),
-                default_z_mm=rack_layout.get("default_rack_plane_z_mm"),
-            )
-            print(f"估计 z_rack = {z_rack:.1f} mm")
-        except TubeRegistryError as exc:
-            print(exc)
-            print("提示: 无 depth 时可加 --z-rack 120.0 做离线测试")
-            return 1
+        print("无法估计 z_rack（无试管且无标定默认值）")
+        print("提示: 无 depth 时可加 --z-rack 120.0 做离线测试")
+        return 1
 
     registry = TubeRegistry(mapper.all_slot_ids())
     registry.update_from_scan(observations, z_rack)

@@ -2,19 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import cv2
 import numpy as np
 from ultralytics import YOLO
 
+from perception.detection import Detection
 
-@dataclass
-class Detection:
-    class_name: str
-    confidence: float
-    bbox: tuple[float, float, float, float]  # x1, y1, x2, y2
-    center_uv: tuple[float, float]  # u, v
+__all__ = ["Detection", "YoloDetector"]
 
 
 class YoloDetector:

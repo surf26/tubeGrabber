@@ -17,7 +17,7 @@ from planning.command_validator import CommandValidator, MoveCommand
 from planning.motion_planner import MotionPlanner, Waypoint, format_waypoints
 from utils.config_loader import load_yaml
 from utils.vision_viz import VisionDisplay, draw_refine_annotation, draw_scan_annotation
-from world.tube_registry import TubeRegistry, estimate_z_rack
+from world.tube_registry import TubeRegistry
 
 
 class FSMError(RuntimeError):
@@ -291,7 +291,7 @@ class PickPlaceFSM:
         T_base_ee = pose_6d_to_matrix(pose_6d)
 
         detections = self._detector.detect(frame.color)
-        observations = self._mapper.map(
+        observations, z_rack = self._mapper.map(
             detections,
             frame.depth,
             K=self._K,
@@ -300,12 +300,12 @@ class PickPlaceFSM:
             T_base_ee=T_base_ee,
             depth_min_mm=self._cam_cfg.get("depth_min_mm", 100),
             depth_max_mm=self._cam_cfg.get("depth_max_mm", 800),
-        )
-        z_rack = estimate_z_rack(
-            observations,
             tube_above_rack_mm=float(self._rack_layout.get("tube_above_rack_mm", 30)),
-            default_z_mm=self._rack_layout.get("default_rack_plane_z_mm"),
+            default_z_rack_mm=self._rack_layout.get("default_rack_plane_z_mm"),
         )
+        if z_rack is None:
+            self._fail("无法确定 z_rack：本次扫描无试管且无标定默认值（先跑 calibrate_rack_height）")
+            return False
         self._registry.update_from_scan(observations, z_rack)
         print(f"[SCAN_GLOBAL] z_rack={z_rack:.1f} mm, tubes={len(self._registry.find_tube_slots())}")
 

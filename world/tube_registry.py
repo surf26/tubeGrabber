@@ -61,23 +61,6 @@ def estimate_z_rack(
     raise TubeRegistryError("无法估计 z_rack，请提供 depth 图或 --z-rack")
 
 
-def _resolve_base_xyz(
-    obs: SlotObservation,
-    z_rack: float,
-) -> tuple[tuple[float, float, float] | None, str]:
-    if obs.klass == "empty":
-        if obs.base_xyz is not None:
-            x, y, _ = obs.base_xyz
-            return (float(x), float(y), float(z_rack)), "rack_plane"
-        return None, "rack_plane"
-    if obs.klass == "tube":
-        if obs.base_xyz is not None:
-            xyz = (float(obs.base_xyz[0]), float(obs.base_xyz[1]), float(obs.base_xyz[2]))
-            return xyz, "measured"
-        return None, "missing"
-    return None, "missing"
-
-
 class TubeRegistry:
     def __init__(self, all_slot_ids: list[str]) -> None:
         if not all_slot_ids:
@@ -115,7 +98,7 @@ class TubeRegistry:
         observations: dict[str, SlotObservation],
         z_rack: float,
     ) -> None:
-        """用 SlotMapper 输出刷新 24 槽状态。"""
+        """用 SlotMapper 输出刷新 24 槽状态。base_xyz/z_source 已由 mapper 算好，直接采用。"""
         self._z_rack = z_rack
         now = time.time()
         for slot_id in self._slot_order:
@@ -124,14 +107,13 @@ class TubeRegistry:
                 self._slots[slot_id] = SlotState(slot_id=slot_id, updated_at=now)
                 continue
 
-            base_xyz, z_source = _resolve_base_xyz(obs, z_rack)
             self._slots[slot_id] = SlotState(
                 slot_id=slot_id,
                 klass=obs.klass,
                 confidence=obs.confidence,
                 pixel_uv=obs.pixel_uv,
-                base_xyz=base_xyz,
-                z_source=z_source,
+                base_xyz=obs.base_xyz,
+                z_source=obs.z_source,
                 updated_at=now,
             )
 

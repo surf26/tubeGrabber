@@ -1,4 +1,12 @@
-"""YOLO 检测 → 24 孔试管架槽位映射。"""
+"""YOLO 检测 → 24 孔试管架槽位映射。
+
+流水线（map）：
+  1. 盖子框(tube) → 真实深度 → base XYZ；由此估 z_rack（盖顶 - 盖高）
+  2. 空槽框(empty) 及深度失效的盖子 → 射线打 z_rack 平面 → base XY
+  3. 左右分架
+  4. 每侧在 base XY 上做点阵吸附(grid_fit) → (行,列) → slot_id
+方向与透视：在真实 XY 平面上拟合，透视自动消失、盖子/空槽高度差不再造成偏移。
+"""
 
 from __future__ import annotations
 
@@ -7,8 +15,13 @@ from typing import Any
 
 import numpy as np
 
-from perception.coord_transform import CoordTransformError, pixel_to_base_mm
-from perception.yolo_detector import Detection
+from perception.coord_transform import (
+    CoordTransformError,
+    pixel_plane_to_base_mm,
+    pixel_to_base_mm,
+)
+from perception.detection import Detection
+from perception.grid_fit import fit_grid
 from utils.config_loader import load_yaml
 
 
@@ -31,7 +44,24 @@ class _DetPoint:
     detection: Detection
     u: float
     v: float
-    side: str = ""
+    base: tuple[float, float, float] | None = None  # base XYZ（盖子=深度，空槽=射线打平面）
+
+
+def estimate_rack_plane_z(
+    tube_zs: list[float],
+    *,
+    tube_above_rack_mm: float = 30.0,
+    default_z_mm: float | None = None,
+) -> float | None:
+    """
+    架面高度 z_rack（mm）。纯函数，不依赖 registry。
+    主力：盖顶 Z 中位数 - 盖高；兜底：预标定 default_z_mm；都无 → None。
+    """
+    if tube_zs:
+        return float(np.median(tube_zs)) - float(tube_above_rack_mm)
+    if default_z_mm is not None:
+        return float(default_z_mm)
+    return None
 
 
 class SlotMapper:
@@ -41,10 +71,18 @@ class SlotMapper:
         *,
         max_assign_dist_px: float = 55.0,
         image_width: int = 640,
+        method: str = "lattice",
+        residual_max_ratio: float = 0.35,
+        min_points_for_fit: int = 6,
+        side_max_count: int = 12,
     ) -> None:
         self._rack = rack_config or load_yaml("config/rack_layout.yaml")
         self._max_assign_dist_px = max_assign_dist_px
         self._image_width = image_width
+        self._method = method
+        self._residual_max_ratio = residual_max_ratio
+        self._min_points_for_fit = min_points_for_fit
+        self._side_max_count = side_max_count
 
         self._left_rows = [str(r) for r in self._rack["left_row_order"]]
         self._left_cols = [int(c) for c in self._rack["left_col_order"]]
@@ -72,24 +110,38 @@ class SlotMapper:
         T_base_ee: np.ndarray | None = None,
         depth_min_mm: float = 100,
         depth_max_mm: float = 800,
-    ) -> dict[str, SlotObservation]:
+        tube_above_rack_mm: float = 30.0,
+        default_z_rack_mm: float | None = None,
+    ) -> tuple[dict[str, SlotObservation], float | None]:
         """
-        将 YOLO 检测映射到 24 个逻辑槽位。
-        若提供 depth + 标定 + 臂姿，则填充 base_xyz。
+        映射 24 槽并返回 (observations, z_rack)。
+        z_rack 由盖子深度估计（空槽射线打平面需要它），因此在 map 内部计算并返回。
         """
         result = {slot_id: SlotObservation(slot_id=slot_id) for slot_id in self.all_slot_ids()}
         if not detections:
-            return result
+            z = float(default_z_rack_mm) if default_z_rack_mm is not None else None
+            return result, z
 
         points = [_DetPoint(det, det.center_uv[0], det.center_uv[1]) for det in detections]
-        split_u = _find_split_u([p.u for p in points], self._image_width)
+        has_geom = all(x is not None for x in (depth, K, dist, T_ee_cam, T_base_ee))
 
+        z_rack: float | None = (
+            float(default_z_rack_mm) if default_z_rack_mm is not None else None
+        )
+        if has_geom:
+            z_rack = self._project_points(
+                points, depth, K, dist, T_ee_cam, T_base_ee,
+                depth_min_mm, depth_max_mm, tube_above_rack_mm, default_z_rack_mm,
+            )
+
+        split_u = _find_split_u([p.u for p in points], self._image_width)
         left_pts = [p for p in points if p.u < split_u]
         right_pts = [p for p in points if p.u >= split_u]
-
-        self._assign_side(left_pts, "left", result, depth, K, dist, T_ee_cam, T_base_ee, depth_min_mm, depth_max_mm)
-        self._assign_side(right_pts, "right", result, depth, K, dist, T_ee_cam, T_base_ee, depth_min_mm, depth_max_mm)
-        return result
+        for pts, side in ((left_pts, "left"), (right_pts, "right")):
+            if len(pts) > self._side_max_count:
+                print(f"[SlotMapper] 警告: {side} 侧检测 {len(pts)} 个 > {self._side_max_count}")
+            self._assign_side(pts, side, result)
+        return result, z_rack
 
     def to_table_str(self, observations: dict[str, SlotObservation]) -> str:
         lines = [f"{'slot_id':<12} {'class':<8} {'conf':>6}  {'uv':<18} {'base_xyz'}", "-" * 70]
@@ -105,113 +157,178 @@ class SlotMapper:
             )
         return "\n".join(lines)
 
+    # --- 内部 ---
+
+    def _project_points(
+        self,
+        points: list[_DetPoint],
+        depth: np.ndarray,
+        K: np.ndarray,
+        dist: np.ndarray,
+        T_ee_cam: np.ndarray,
+        T_base_ee: np.ndarray,
+        depth_min_mm: float,
+        depth_max_mm: float,
+        tube_above_rack_mm: float,
+        default_z_rack_mm: float | None,
+    ) -> float | None:
+        """盖子走真实深度、空槽走射线打平面；返回 z_rack。"""
+        tube_zs: list[float] = []
+        for p in points:
+            if p.detection.class_name != "tube":
+                continue
+            try:
+                pb, _ = pixel_to_base_mm(
+                    p.u, p.v, depth, K, dist, T_ee_cam, T_base_ee,
+                    depth_min_mm=depth_min_mm, depth_max_mm=depth_max_mm,
+                )
+                p.base = (float(pb[0]), float(pb[1]), float(pb[2]))
+                tube_zs.append(float(pb[2]))
+            except CoordTransformError:
+                p.base = None  # 盖子深度失效，稍后射线打平面兜底
+
+        z_rack = estimate_rack_plane_z(
+            tube_zs, tube_above_rack_mm=tube_above_rack_mm, default_z_mm=default_z_rack_mm
+        )
+        if z_rack is not None:
+            for p in points:
+                if p.base is not None:
+                    continue  # 盖子已用真实深度
+                try:
+                    pb = pixel_plane_to_base_mm(p.u, p.v, z_rack, K, dist, T_ee_cam, T_base_ee)
+                    p.base = (float(pb[0]), float(pb[1]), float(pb[2]))
+                except CoordTransformError:
+                    p.base = None
+        return z_rack
+
     def _assign_side(
         self,
         points: list[_DetPoint],
         side: str,
         result: dict[str, SlotObservation],
-        depth: np.ndarray | None,
-        K: np.ndarray | None,
-        dist: np.ndarray | None,
-        T_ee_cam: np.ndarray | None,
-        T_base_ee: np.ndarray | None,
-        depth_min_mm: float,
-        depth_max_mm: float,
     ) -> None:
         if not points:
             return
-
         row_order = self._left_rows if side == "left" else self._right_rows
         col_order = self._left_cols if side == "left" else self._right_cols
 
-        col_labels = _cluster_1d([p.u for p in points], k=len(col_order))
-        row_labels = _cluster_1d([p.v for p in points], k=len(row_order))
+        if self._method == "lattice" and self._try_lattice(points, side, row_order, col_order, result):
+            return
+        self._assign_side_legacy(points, side, row_order, col_order, result)
 
-        grid_centers: dict[tuple[int, int], list[tuple[float, float]]] = {}
-        for p, col_idx, row_idx in zip(points, col_labels, row_labels):
-            grid_centers.setdefault((col_idx, row_idx), []).append((p.u, p.v))
+    def _try_lattice(
+        self,
+        points: list[_DetPoint],
+        side: str,
+        row_order: list[str],
+        col_order: list[int],
+        result: dict[str, SlotObservation],
+    ) -> bool:
+        """在 base XY（缺失则退回像素）上做点阵吸附。成功返回 True。"""
+        if len(points) < self._min_points_for_fit:
+            return False
+        use_base = all(p.base is not None for p in points)
+        if use_base:
+            coords = np.array([[p.base[0], p.base[1]] for p in points], dtype=np.float64)
+        else:
+            coords = np.array([[p.u, p.v] for p in points], dtype=np.float64)
 
-        grid_mean: dict[tuple[int, int], tuple[float, float]] = {}
-        for key, uv_list in grid_centers.items():
-            us = [uv[0] for uv in uv_list]
-            vs = [uv[1] for uv in uv_list]
-            grid_mean[key] = (float(np.mean(us)), float(np.mean(vs)))
+        fit = fit_grid(
+            coords, len(col_order), len(row_order),
+            residual_max_ratio=self._residual_max_ratio,
+            min_points=self._min_points_for_fit,
+        )
+        if not fit.ok:
+            return False
+
+        valid = [(p, ij) for p, ij in zip(points, fit.indices) if ij is not None]
+        if not valid:
+            return False
+
+        cols = np.array([ij[0] for _, ij in valid])
+        rows = np.array([ij[1] for _, ij in valid])
+        us = np.array([p.u for p, _ in valid])
+        vs = np.array([p.v for p, _ in valid])
+        n_cols, n_rows = len(col_order), len(row_order)
+        # 方向校正：col_idx 随图像 u 增大、row_idx 随 v 增大（与 config 的 col/row_order 约定一致）
+        if _corr_sign(cols, us) < 0:
+            cols = (n_cols - 1) - cols
+        if _corr_sign(rows, vs) < 0:
+            rows = (n_rows - 1) - rows
 
         assigned: dict[str, _DetPoint] = {}
-        for p, col_idx, row_idx in zip(points, col_labels, row_labels):
-            if col_idx >= len(col_order) or row_idx >= len(row_order):
+        for (p, _), c, r in zip(valid, cols, rows):
+            if not (0 <= c < n_cols and 0 <= r < n_rows):
                 continue
-
-            row = row_order[row_idx]
-            col = col_order[col_idx]
-            slot_id = f"{side}.{row}{col}"
-
-            mean_uv = grid_mean.get((col_idx, row_idx))
-            if mean_uv is not None:
-                dist_px = np.hypot(p.u - mean_uv[0], p.v - mean_uv[1])
-                if dist_px > self._max_assign_dist_px:
-                    continue
-
+            slot_id = f"{side}.{row_order[r]}{col_order[c]}"
             prev = assigned.get(slot_id)
             if prev is None or p.detection.confidence > prev.detection.confidence:
                 assigned[slot_id] = p
-
         for slot_id, p in assigned.items():
-            obs = _detection_to_observation(
-                slot_id,
-                p.detection,
-                depth,
-                K,
-                dist,
-                T_ee_cam,
-                T_base_ee,
-                depth_min_mm,
-                depth_max_mm,
-            )
-            result[slot_id] = obs
+            result[slot_id] = _point_to_observation(slot_id, p)
+        return True
+
+    def _assign_side_legacy(
+        self,
+        points: list[_DetPoint],
+        side: str,
+        row_order: list[str],
+        col_order: list[int],
+        result: dict[str, SlotObservation],
+    ) -> None:
+        """旧算法：u/v 各自 1D 分堆（兜底，架子须近似正对）。坐标沿用已投影的 p.base。"""
+        col_labels = _cluster_1d([p.u for p in points], k=len(col_order))
+        row_labels = _cluster_1d([p.v for p in points], k=len(row_order))
+
+        grid_uv: dict[tuple[int, int], list[tuple[float, float]]] = {}
+        for p, ci, ri in zip(points, col_labels, row_labels):
+            grid_uv.setdefault((ci, ri), []).append((p.u, p.v))
+        grid_mean = {
+            key: (float(np.mean([u for u, _ in lst])), float(np.mean([v for _, v in lst])))
+            for key, lst in grid_uv.items()
+        }
+
+        assigned: dict[str, _DetPoint] = {}
+        for p, ci, ri in zip(points, col_labels, row_labels):
+            if ci >= len(col_order) or ri >= len(row_order):
+                continue
+            mean_uv = grid_mean.get((ci, ri))
+            if mean_uv is not None and np.hypot(p.u - mean_uv[0], p.v - mean_uv[1]) > self._max_assign_dist_px:
+                continue
+            slot_id = f"{side}.{row_order[ri]}{col_order[ci]}"
+            prev = assigned.get(slot_id)
+            if prev is None or p.detection.confidence > prev.detection.confidence:
+                assigned[slot_id] = p
+        for slot_id, p in assigned.items():
+            result[slot_id] = _point_to_observation(slot_id, p)
 
 
-def _detection_to_observation(
-    slot_id: str,
-    det: Detection,
-    depth: np.ndarray | None,
-    K: np.ndarray | None,
-    dist: np.ndarray | None,
-    T_ee_cam: np.ndarray | None,
-    T_base_ee: np.ndarray | None,
-    depth_min_mm: float,
-    depth_max_mm: float,
-) -> SlotObservation:
-    u, v = det.center_uv
-    base_xyz = None
-    z_source = "missing"
-
-    if depth is not None and K is not None and dist is not None and T_ee_cam is not None and T_base_ee is not None:
-        try:
-            p_base, _ = pixel_to_base_mm(
-                u,
-                v,
-                depth,
-                K,
-                dist,
-                T_ee_cam,
-                T_base_ee,
-                depth_min_mm=depth_min_mm,
-                depth_max_mm=depth_max_mm,
-            )
-            base_xyz = (float(p_base[0]), float(p_base[1]), float(p_base[2]))
-            z_source = "measured"
-        except CoordTransformError:
-            pass
-
+def _point_to_observation(slot_id: str, p: _DetPoint) -> SlotObservation:
+    det = p.detection
+    if p.base is None:
+        z_source = "missing"
+    elif det.class_name == "tube":
+        z_source = "measured"
+    else:
+        z_source = "rack_plane"
     return SlotObservation(
         slot_id=slot_id,
         klass=det.class_name,
         confidence=det.confidence,
-        pixel_uv=(float(u), float(v)),
-        base_xyz=base_xyz,
+        pixel_uv=(float(p.u), float(p.v)),
+        base_xyz=p.base,
         z_source=z_source,
     )
+
+
+def _corr_sign(a: np.ndarray, b: np.ndarray) -> float:
+    """a 与 b 的相关符号；方差退化时返回 +1（不翻转）。"""
+    a = a.astype(np.float64)
+    b = b.astype(np.float64)
+    if a.std() < 1e-9 or b.std() < 1e-9:
+        return 1.0
+    c = float(np.corrcoef(a, b)[0, 1])
+    return -1.0 if c < 0 else 1.0
 
 
 def _find_split_u(values: list[float], image_width: int) -> float:
@@ -231,10 +348,7 @@ def _find_split_u(values: list[float], image_width: int) -> float:
 
 
 def _cluster_1d(values: list[float], k: int) -> list[int]:
-    """
-    一维 k-means，返回每个值的簇索引 0..k-1。
-    簇编号按质心从小到大排序（u/v 小的簇号小）。
-    """
+    """一维 k-means，返回每个值的簇索引 0..k-1（质心从小到大编号）。"""
     arr = np.array(values, dtype=np.float64)
     n = len(arr)
     if n == 0:
@@ -245,7 +359,6 @@ def _cluster_1d(values: list[float], k: int) -> list[int]:
 
     centroids = np.linspace(float(arr.min()), float(arr.max()), k)
     labels = np.zeros(n, dtype=int)
-
     for _ in range(40):
         dists = np.abs(arr[:, None] - centroids[None, :])
         labels = np.argmin(dists, axis=1)

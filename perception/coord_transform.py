@@ -190,6 +190,52 @@ def pixel_to_base_mm(
     return p_base, debug
 
 
+def pixel_ray_base(
+    u: float,
+    v: float,
+    K: np.ndarray,
+    dist: np.ndarray,
+    T_ee_cam: np.ndarray,
+    T_base_ee: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    像素 → base 系下的视线：返回 (光心 O_base, 方向 d_base)，单位 mm。
+    不需要深度；用于射线与已知平面求交。
+    """
+    u_und, v_und = undistort_uv(u, v, K, dist)
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+    d_cam = np.array([(u_und - cx) / fx, (v_und - cy) / fy, 1.0], dtype=np.float64)
+
+    T_base_cam = T_base_ee @ T_ee_cam
+    O_base = T_base_cam[:3, 3].astype(np.float64)
+    d_base = T_base_cam[:3, :3] @ d_cam  # 方向只旋转，不平移
+    return O_base, d_base
+
+
+def pixel_plane_to_base_mm(
+    u: float,
+    v: float,
+    z_plane_mm: float,
+    K: np.ndarray,
+    dist: np.ndarray,
+    T_ee_cam: np.ndarray,
+    T_base_ee: np.ndarray,
+) -> np.ndarray:
+    """
+    像素 + 已知水平面 z=z_plane_mm → base 3D 点 (3,) mm。
+    相机视线与该平面求交，无需深度图（用于空槽：洞口深度不可靠）。
+    """
+    O_base, d_base = pixel_ray_base(u, v, K, dist, T_ee_cam, T_base_ee)
+    if abs(d_base[2]) < 1e-6:
+        raise CoordTransformError("视线与 z 平面近似平行，无法求交")
+    t = (z_plane_mm - O_base[2]) / d_base[2]
+    if t <= 0:
+        raise CoordTransformError("平面交点在相机后方")
+    p = O_base + t * d_base
+    return np.array([p[0], p[1], z_plane_mm], dtype=np.float64)
+
+
 def _rotation_matrix_rpy(rx: float, ry: float, rz: float) -> np.ndarray:
     """R = Rz(rz) @ Ry(ry) @ Rx(rx)。"""
     cx, sx = np.cos(rx), np.sin(rx)

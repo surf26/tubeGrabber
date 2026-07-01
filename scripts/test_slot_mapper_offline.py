@@ -77,8 +77,9 @@ def main() -> int:
     detections = detector.detect(color)
     print(f"YOLO 检测数: {len(detections)}")
 
+    rack_layout = load_yaml(cfg["calib"]["rack_layout"])
     mapper = SlotMapper(
-        rack_config=load_yaml(cfg["calib"]["rack_layout"]),
+        rack_config=rack_layout,
         image_width=cam_cfg["width"],
     )
 
@@ -102,7 +103,7 @@ def main() -> int:
 
         T_base_ee = pose_6d_to_matrix(pose_6d)
 
-    observations = mapper.map(
+    observations, z_rack = mapper.map(
         detections,
         depth,
         K=K,
@@ -111,10 +112,14 @@ def main() -> int:
         T_base_ee=T_base_ee,
         depth_min_mm=cam_cfg.get("depth_min_mm", 100),
         depth_max_mm=cam_cfg.get("depth_max_mm", 800),
+        tube_above_rack_mm=float(rack_layout.get("tube_above_rack_mm", 30)),
+        default_z_rack_mm=rack_layout.get("default_rack_plane_z_mm"),
     )
 
     print()
     print(mapper.to_table_str(observations))
+    if z_rack is not None:
+        print(f"z_rack = {z_rack:.1f} mm")
 
     tube_n = sum(1 for o in observations.values() if o.klass == "tube")
     empty_n = sum(1 for o in observations.values() if o.klass == "empty")

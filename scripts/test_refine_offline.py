@@ -23,7 +23,7 @@ from perception.refine import RefineError, refine_pick_slot, refine_place_slot
 from perception.slot_mapper import SlotMapper
 from perception.yolo_detector import YoloDetector
 from utils.config_loader import load_config, load_yaml
-from world.tube_registry import TubeRegistry, estimate_z_rack
+from world.tube_registry import TubeRegistry
 
 
 def main() -> int:
@@ -99,7 +99,7 @@ def main() -> int:
 
     mapper = SlotMapper(rack_config=rack_layout, image_width=cam_cfg["width"])
     detections = scan_detector.detect(color)
-    observations = mapper.map(
+    observations, z_rack = mapper.map(
         detections,
         depth,
         K=K,
@@ -108,16 +108,11 @@ def main() -> int:
         T_base_ee=T_base_ee,
         depth_min_mm=cam_cfg.get("depth_min_mm", 100),
         depth_max_mm=cam_cfg.get("depth_max_mm", 800),
+        tube_above_rack_mm=float(rack_layout.get("tube_above_rack_mm", 30)),
+        default_z_rack_mm=rack_layout.get("default_rack_plane_z_mm"),
     )
-
-    try:
-        z_rack = estimate_z_rack(
-            observations,
-            tube_above_rack_mm=float(rack_layout.get("tube_above_rack_mm", 30)),
-            default_z_mm=rack_layout.get("default_rack_plane_z_mm"),
-        )
-    except Exception as exc:
-        print(f"无法估计 z_rack: {exc}")
+    if z_rack is None:
+        print("无法估计 z_rack（无试管且无标定默认值）")
         return 1
 
     registry = TubeRegistry(mapper.all_slot_ids())

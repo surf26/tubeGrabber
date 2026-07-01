@@ -79,6 +79,12 @@ registry:
   slot_match_max_dist_mm: 15        # 精定位候选与预期槽 base_xy 最大平面偏差 (mm)
   refine_ambiguity_min_delta_mm: 2  # 最近/次近候选 dist_xy 最小差距，低于此报歧义；现场可试 5
 
+mapper:
+  method: lattice           # lattice(点阵吸附) | legacy(旧 1D 分堆，架子须正对)
+  residual_max_ratio: 0.35  # 点到吸附格点距离 > 此比例×最小格距 判孤儿
+  min_points_for_fit: 6     # 某侧检测少于此不做点阵拟合，退回 legacy
+  side_max_count: 12        # 每侧检测数上限，超出仅告警
+
 # 标定文件路径（具体矩阵内容见对应 yaml）
 calib:
   hand_eye: "config/hand_eye.yaml"
