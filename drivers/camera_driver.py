@@ -140,35 +140,47 @@ class CameraDriver:
         return self._pipeline is not None
 
     def capture(self) -> Frame:
-        """取一帧对齐后的 BGR 彩色图与深度图（mm）。"""
+        """取一帧对齐后的 BGR 彩色图与深度图（mm）。
+
+        启动初期或偶发丢帧时，帧集可能缺 color/depth 之一；此处在超时预算内重试，
+        直到取到 color+depth 齐全的一帧，而非见到第一帧不完整就报错。
+        """
         pipeline = self._require_pipeline()
 
-        frames = pipeline.wait_for_frames(self._frame_timeout_ms)
-        if frames is None:
-            raise CameraDriverError("wait_for_frames 超时")
+        deadline = time.monotonic() + max(self._frame_timeout_ms / 1000.0, 3.0)
+        last_reason = "无帧"
+        while time.monotonic() < deadline:
+            frames = pipeline.wait_for_frames(self._frame_timeout_ms)
+            if frames is None:
+                last_reason = "wait_for_frames 超时"
+                continue
 
-        if self._align_filter is not None:
-            aligned = self._align_filter.process(frames)
-            if aligned is None:
-                raise CameraDriverError("AlignFilter 处理失败")
-            frames = aligned.as_frame_set()
+            if self._align_filter is not None:
+                aligned = self._align_filter.process(frames)
+                if aligned is None:
+                    last_reason = "AlignFilter 处理失败"
+                    continue
+                frames = aligned.as_frame_set()
 
-        color_frame = frames.get_color_frame()
-        depth_frame = frames.get_depth_frame()
-        if color_frame is None or depth_frame is None:
-            raise CameraDriverError("color 或 depth 帧为空")
+            color_frame = frames.get_color_frame()
+            depth_frame = frames.get_depth_frame()
+            if color_frame is None or depth_frame is None:
+                last_reason = "color 或 depth 帧为空（帧集不完整，重试）"
+                continue
 
-        color = _frame_to_bgr_image(color_frame)
-        if color is None:
-            raise CameraDriverError(f"不支持的彩色格式: {color_frame.get_format()}")
+            color = _frame_to_bgr_image(color_frame)
+            if color is None:
+                raise CameraDriverError(f"不支持的彩色格式: {color_frame.get_format()}")
 
-        depth = _depth_frame_to_mm(depth_frame)
-        if color.shape[:2] != depth.shape[:2]:
-            raise CameraDriverError(
-                f"彩色与深度尺寸不一致: color={color.shape[:2]}, depth={depth.shape[:2]}"
-            )
+            depth = _depth_frame_to_mm(depth_frame)
+            if color.shape[:2] != depth.shape[:2]:
+                raise CameraDriverError(
+                    f"彩色与深度尺寸不一致: color={color.shape[:2]}, depth={depth.shape[:2]}"
+                )
 
-        return Frame(color=color, depth=depth, timestamp=time.time())
+            return Frame(color=color, depth=depth, timestamp=time.time())
+
+        raise CameraDriverError(f"取帧超时，最后原因: {last_reason}")
 
     def get_intrinsics(self) -> dict[str, Any]:
         """读取 config/camera_intrinsics.yaml（Phase 2 先用离线标定）。"""
@@ -205,6 +217,10 @@ def _try_enable_hw_d2c(
         config.enable_stream(hw_list[0])
         config.enable_stream(color_profile)
         config.set_align_mode(OBAlignMode.HW_MODE)
+        # 与软件对齐路径一致：要求帧集同时含 color+depth，减少不完整帧集
+        config.set_frame_aggregate_output_mode(
+            OBFrameAggregateOutputMode.FULL_FRAME_REQUIRE
+        )
         return True
 
     return False
