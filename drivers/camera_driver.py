@@ -12,7 +12,6 @@ from pyorbbecsdk import (
     AlignFilter,
     Config,
     Context,
-    OBAlignMode,
     OBFormat,
     OBFrameAggregateOutputMode,
     OBStreamType,
@@ -55,7 +54,6 @@ class CameraDriver:
 
         self._pipeline: Pipeline | None = None
         self._align_filter: AlignFilter | None = None
-        self._use_hw_d2c = False
 
     def connect(self) -> None:
         """按 serial 打开设备，失败抛出 CameraDriverError。"""
@@ -84,33 +82,28 @@ class CameraDriver:
             pipeline = Pipeline(device)
             config = Config()
 
-            if _try_enable_hw_d2c(pipeline, config, self._width, self._height, self._fps):
-                self._use_hw_d2c = True
-                self._align_filter = None
-            else:
-                color_profile = _pick_video_profile(
-                    pipeline,
-                    OBSensorType.COLOR_SENSOR,
-                    self._width,
-                    self._height,
-                    OBFormat.RGB,
-                    self._fps,
-                )
-                depth_profile = _pick_video_profile(
-                    pipeline,
-                    OBSensorType.DEPTH_SENSOR,
-                    self._width,
-                    self._height,
-                    OBFormat.Y16,
-                    self._fps,
-                )
-                config.enable_stream(color_profile)
-                config.enable_stream(depth_profile)
-                config.set_frame_aggregate_output_mode(
-                    OBFrameAggregateOutputMode.FULL_FRAME_REQUIRE
-                )
-                self._align_filter = AlignFilter(align_to_stream=OBStreamType.COLOR_STREAM)
-                self._use_hw_d2c = False
+            color_profile = _pick_video_profile(
+                pipeline,
+                OBSensorType.COLOR_SENSOR,
+                self._width,
+                self._height,
+                OBFormat.RGB,
+                self._fps,
+            )
+            depth_profile = _pick_video_profile(
+                pipeline,
+                OBSensorType.DEPTH_SENSOR,
+                self._width,
+                self._height,
+                OBFormat.Y16,
+                self._fps,
+            )
+            config.enable_stream(color_profile)
+            config.enable_stream(depth_profile)
+            config.set_frame_aggregate_output_mode(
+                OBFrameAggregateOutputMode.FULL_FRAME_REQUIRE
+            )
+            self._align_filter = AlignFilter(align_to_stream=OBStreamType.COLOR_STREAM)
 
             pipeline.start(config)
             self._pipeline = pipeline
@@ -134,7 +127,6 @@ class CameraDriver:
                 pass
         self._pipeline = None
         self._align_filter = None
-        self._use_hw_d2c = False
 
     def is_connected(self) -> bool:
         return self._pipeline is not None
@@ -147,11 +139,13 @@ class CameraDriver:
         if frames is None:
             raise CameraDriverError("wait_for_frames 超时")
 
-        if self._align_filter is not None:
-            aligned = self._align_filter.process(frames)
-            if aligned is None:
-                raise CameraDriverError("AlignFilter 处理失败")
-            frames = aligned.as_frame_set()
+        if self._align_filter is None:
+            raise CameraDriverError("AlignFilter 未初始化")
+
+        aligned = self._align_filter.process(frames)
+        if aligned is None:
+            raise CameraDriverError("AlignFilter 处理失败")
+        frames = aligned.as_frame_set()
 
         color_frame = frames.get_color_frame()
         depth_frame = frames.get_depth_frame()
@@ -178,36 +172,6 @@ class CameraDriver:
         if self._pipeline is None:
             raise CameraDriverError("相机未连接，请先调用 connect()")
         return self._pipeline
-
-
-def _try_enable_hw_d2c(
-    pipeline: Pipeline,
-    config: Config,
-    width: int,
-    height: int,
-    fps: int,
-) -> bool:
-    """尝试硬件 D2C：深度对齐到彩色坐标系。"""
-    profile_list = pipeline.get_stream_profile_list(OBSensorType.COLOR_SENSOR)
-    for i in range(len(profile_list)):
-        color_profile = profile_list[i]
-        if color_profile.get_format() != OBFormat.RGB:
-            continue
-        if color_profile.get_width() != width or color_profile.get_height() != height:
-            continue
-        if fps and color_profile.get_fps() != fps:
-            continue
-
-        hw_list = pipeline.get_d2c_depth_profile_list(color_profile, OBAlignMode.HW_MODE)
-        if len(hw_list) == 0:
-            continue
-
-        config.enable_stream(hw_list[0])
-        config.enable_stream(color_profile)
-        config.set_align_mode(OBAlignMode.HW_MODE)
-        return True
-
-    return False
 
 
 def _pick_video_profile(

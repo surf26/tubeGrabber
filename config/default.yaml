@@ -18,17 +18,23 @@ camera:
 gripper:
   modbus_port: 1             # 末端 RS485，睿尔曼 JSON 协议 port=1
   device_id: 1               # 夹爪 Modbus 从站地址，首次联调后按实际修改
-  baudrate: 115200
+  baudrate: 9600             # 与旧项目一致；四代机用 rm_set_tool_rs485_mode
+  tool_voltage: 3            # 3 = 工具端 24V，夹爪上电必需
   full_stroke: 256000
-  open_position: 256000      # 张开目标步数，需实测标定后修改
-  close_position: 0          # 闭合目标步数，需实测标定后修改
+  open_position: 256000      # 张开目标步数
+  close_position: 0          # 闭合目标步数（0 = 全闭）
+  zero_speed: 25600          # 寄存器 36：找零速度
+  init_speed: 51200          # 寄存器 38：初始速度
+  run_speed: 51200           # 寄存器 40：运行速度
   # 法兰 → 夹爪 TCP（指尖/抓取中心），末端坐标系下平移 mm；视觉 base_xyz 为 TCP 目标点
   tcp_offset_mm: [0, 0, -220]   # 实测：法兰原点到夹爪指尖，常见为 ee -Z 方向负值
-  reg_position: 36           # 以夹爪手册为准
-  reg_speed: 38
-  reg_force: 40
-  reg_command: 43
-  modbus_timeout: 2            # rm_set_modbus_mode 超时，单位 100ms
+  reg_zero_speed: 36
+  reg_init_speed: 38
+  reg_run_speed: 40
+  reg_command: 43            # 写目标位置
+  # reg_position_feedback:     # 若有位置反馈寄存器可取消注释
+  modbus_timeout: 2            # rm_set_modbus_mode 超时，单位 100ms（三代机回退用）
+  init_close_wait_s: 5.0       # 初始化写闭合位后等待找零
   position_reg_count: 2        # 位置占 2 个 16 位寄存器（32 位步数）
   move_timeout_s: 5.0
   position_tolerance: 500      # 到位容差（步）
