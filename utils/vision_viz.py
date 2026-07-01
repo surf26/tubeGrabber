@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import select
+import sys
 import threading
 import time
-from typing import Any
 
 from utils.opencv_gui import cv2
 import numpy as np
@@ -57,7 +58,7 @@ def draw_scan_annotation(
         _text(canvas, label, (18, y0 + 3), color, font_scale * 0.75)
         y0 += 12
 
-    _caption(canvas, "Enter/Space continue", (6, canvas.shape[0] - 6))
+    _caption(canvas, "Enter/Space 或终端回车继续", (6, canvas.shape[0] - 6))
     return canvas
 
 
@@ -83,7 +84,7 @@ def draw_refine_annotation(
     else:
         _caption(canvas, f"{title} {slot_id}", (6, 14))
 
-    _caption(canvas, "Enter/Space continue", (6, canvas.shape[0] - 6))
+    _caption(canvas, "Enter/Space 或终端回车继续", (6, canvas.shape[0] - 6))
     return canvas
 
 
@@ -268,10 +269,34 @@ class VisionDisplay:
 
     @staticmethod
     def _wait(window: str, wait_ms: int) -> None:
+        """等待继续：图像窗口按键，或终端按 Enter（Linux/Qt 下终端回车更可靠）。"""
         if wait_ms > 0:
             cv2.waitKey(wait_ms)
-        else:
-            while True:
-                key = cv2.waitKey(50) & 0xFF
-                if key in (13, 10, 32, ord("c")):
+            return
+
+        print(f"[{window}] 继续：点选图像窗口后 Enter/Space，或直接在本终端按 Enter")
+
+        qt_continue = {16777220, 16777221, 16777232}  # Qt Return / Enter / Space
+        ascii_continue = {13, 10, 32, ord("c"), ord("C")}
+
+        while True:
+            key = cv2.waitKeyEx(30)
+            if key != -1:
+                if key in qt_continue or (key & 0xFF) in ascii_continue:
                     break
+
+            if VisionDisplay._stdin_has_enter():
+                break
+
+    @staticmethod
+    def _stdin_has_enter() -> bool:
+        if not sys.stdin.isatty():
+            return False
+        try:
+            ready, _, _ = select.select([sys.stdin], [], [], 0)
+        except (ValueError, OSError):
+            return False
+        if not ready:
+            return False
+        sys.stdin.readline()
+        return True
