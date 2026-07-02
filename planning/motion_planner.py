@@ -37,12 +37,45 @@ class MotionPlanner:
         self._config = config
         self._motion = config.get("motion", {})
         self._arm = config.get("arm", {})
+        self._safety = config.get("safety", {})
+        self._tube = config.get("tube", {})
         self._transit_z_offset_mm = float(
             config.get("paths", {}).get("transit_z_offset_mm", 80)
         )
         self._approach_height_mm = float(
             self._motion.get("approach_height_mm", 50)
         )
+        self._refine_height_mm = float(
+            self._motion.get("refine_height_mm", self._approach_height_mm)
+        )
+        self._carried_extension_below_tcp_mm = float(
+            self._tube.get(
+                "carried_extension_below_tcp_mm",
+                self._tube.get("length_mm", 0.0),
+            )
+        )
+        self._place_bottom_clearance_mm = float(
+            self._tube.get("place_bottom_clearance_mm", 10.0)
+        )
+        self._place_approach_height_mm = float(
+            self._motion.get(
+                "place_approach_height_mm",
+                max(
+                    self._approach_height_mm,
+                    self._carried_extension_below_tcp_mm
+                    + self._place_bottom_clearance_mm,
+                ),
+            )
+        )
+        self._carried_obstacle_clearance_mm = float(
+            self._tube.get("carried_obstacle_clearance_mm", 30.0)
+        )
+        self._use_lift_for_place = bool(
+            self._motion.get("use_lift_pose_for_place_transit", True)
+        )
+        self._carried_clearance_z_mm = self._motion.get("carried_clearance_z_mm")
+        if self._carried_clearance_z_mm is not None:
+            self._carried_clearance_z_mm = float(self._carried_clearance_z_mm)
         self._default_speed = int(self._arm.get("default_speed", 20))
         self._approach_speed = int(self._arm.get("approach_speed", 10))
         self._tcp_offset_mm = load_tcp_offset_mm(config=config)
@@ -50,7 +83,10 @@ class MotionPlanner:
         self._scan_pose = _as_pose6(poses["scan"])
         self._left_region = _as_pose6(poses["left_region"])
         self._right_region = _as_pose6(poses["right_region"])
+        self._lift_pose = _as_pose6(poses.get("lift", poses["scan"]))
         self._vertical_pose = _as_pose6(poses["vertical"])
+        self._max_tool_tilt_deg = float(self._safety.get("max_tool_tilt_deg", 5.0))
+        self._assert_vertical_tool(self._vertical_pose[3:6])
 
     @classmethod
     def from_config(cls, config: dict[str, Any] | None = None) -> MotionPlanner:
@@ -60,6 +96,7 @@ class MotionPlanner:
             "scan": _load_pose_list(pose_cfg["scan_pose"]),
             "left_region": _load_pose_list(pose_cfg["left_region_pose"]),
             "right_region": _load_pose_list(pose_cfg["right_region_pose"]),
+            "lift": _load_pose_list(pose_cfg.get("lift_pose", pose_cfg["scan_pose"])),
             "vertical": _load_pose_list(pose_cfg["vertical_ee_pose"]),
         }
         return cls(cfg, poses)
@@ -72,6 +109,22 @@ class MotionPlanner:
     def tcp_offset_mm(self) -> tuple[float, float, float]:
         o = self._tcp_offset_mm
         return (float(o[0]), float(o[1]), float(o[2]))
+
+    @property
+    def carried_extension_below_tcp_mm(self) -> float:
+        return self._carried_extension_below_tcp_mm
+
+    def carried_lowest_z(
+        self,
+        pose: tuple[float, float, float, float, float, float],
+    ) -> float:
+        """夹着试管时，工具/试管组合最低点的基坐标 Z。"""
+        x, y, z, rx, ry, rz = pose
+        R = rotation_matrix_rpy(rx, ry, rz)
+        flange = np.array([x, y, z], dtype=np.float64)
+        tcp = flange + R @ self._tcp_offset_mm
+        tube_bottom = flange + R @ self._carried_tip_offset_mm()
+        return float(min(tcp[2], tube_bottom[2]))
 
     def plan_to_scan(
         self,
@@ -160,8 +213,74 @@ class MotionPlanner:
         slot: SlotState,
         from_pose: tuple[float, float, float, float, float, float],
     ) -> list[Waypoint]:
+        if self._use_lift_for_place:
+            side = slot.slot_id.split(".", 1)[0]
+            return self.plan_carried_transit_to_slot(slot, side, from_pose)
         side = slot.slot_id.split(".", 1)[0]
         return self.plan_transit_to_slot(slot, side, from_pose)
+
+    def plan_carried_transit_to_slot(
+        self,
+        slot: SlotState,
+        side: str,
+        from_pose: tuple[float, float, float, float, float, float],
+    ) -> list[Waypoint]:
+        """
+        带试管转移到目标槽。
+
+        与普通 transit 相比，先进入示教的 lift_pose 走廊，再进入目标侧
+        region。这个路段用于夹着试管时的第二段运动，避免从源槽附近直接
+        横穿到目标孔上方。
+        """
+        if slot.base_xyz is None:
+            raise MotionPlannerError(f"{slot.slot_id} 缺少 base_xyz")
+
+        side = side.lower()
+        if side not in ("left", "right"):
+            raise MotionPlannerError(f"无效 side: {side}")
+
+        refine = self.build_place_approach_pose(slot.base_xyz)
+
+        safe_z = max(from_pose[2], self._lift_pose[2], self._scan_pose[2], refine[2])
+        if self._carried_clearance_z_mm is not None:
+            safe_z = max(safe_z, self._carried_clearance_z_mm)
+        safe_z = max(safe_z, self._required_carried_flange_z(slot.base_xyz[2]))
+        waypoints: list[Waypoint] = [
+            Waypoint(
+                f"{slot.slot_id}_carry_raise",
+                _with_z(from_pose, safe_z),
+                speed=self._default_speed,
+            ),
+            Waypoint(
+                "carry_lift",
+                _with_z(self._lift_pose, safe_z),
+                speed=self._default_speed,
+            ),
+        ]
+
+        # 夹着试管时先在高位走廊横移到目标正上方，再垂直下降到放置高度。
+        above_slot = _with_z(refine, safe_z)
+        waypoints.append(
+            Waypoint(f"{slot.slot_id}_above_high", above_slot, speed=self._default_speed)
+        )
+        waypoints.append(
+            Waypoint(f"{slot.slot_id}_refine", refine, speed=self._approach_speed)
+        )
+        return waypoints
+
+    def build_refine_pose(
+        self,
+        base_xyz: tuple[float, float, float],
+    ) -> tuple[float, float, float, float, float, float]:
+        """视觉精定位位姿：TCP 停在目标上方 refine_height_mm。"""
+        return self.build_approach_pose(base_xyz, self._refine_height_mm)
+
+    def build_place_approach_pose(
+        self,
+        base_xyz: tuple[float, float, float],
+    ) -> tuple[float, float, float, float, float, float]:
+        """放置位姿：按夹持试管底端留安全高度，而不是只按夹爪 TCP。"""
+        return self.build_approach_pose(base_xyz, self._place_approach_height_mm)
 
     def build_approach_pose(
         self,
@@ -179,6 +298,7 @@ class MotionPlanner:
         )
         x, y, z = (float(base_xyz[0]), float(base_xyz[1]), float(base_xyz[2]))
         rx, ry, rz = self._vertical_pose[3:6]
+        self._assert_vertical_tool((rx, ry, rz))
         tip_xyz = (x, y, z + height)
         flange_xyz = tip_xyz_to_flange_xyz(tip_xyz, (rx, ry, rz), self._tcp_offset_mm)
         return (*flange_xyz, rx, ry, rz)
@@ -195,6 +315,11 @@ class MotionPlanner:
         self,
         approach_pose: tuple[float, float, float, float, float, float],
     ) -> tuple[float, float, float, float, float, float]:
+        if "pick_descend_mm" in self._motion:
+            return self.build_descend_pose(
+                approach_pose,
+                float(self._motion["pick_descend_mm"]),
+            )
         insert = float(self._motion.get("pick_insert_mm", 25))
         return self._build_insert_pose(approach_pose, insert)
 
@@ -202,8 +327,56 @@ class MotionPlanner:
         self,
         approach_pose: tuple[float, float, float, float, float, float],
     ) -> tuple[float, float, float, float, float, float]:
+        if "place_descend_mm" in self._motion:
+            return self.build_descend_pose(
+                approach_pose,
+                self._checked_place_descend_mm(),
+            )
         insert = float(self._motion.get("place_insert_mm", 20))
         return self._build_insert_pose(approach_pose, insert)
+
+    def build_descend_pose(
+        self,
+        approach_pose: tuple[float, float, float, float, float, float],
+        descend_mm: float,
+    ) -> tuple[float, float, float, float, float, float]:
+        """从当前 approach 位沿 EE +Z 方向下探指定距离。"""
+        x, y, z, rx, ry, rz = approach_pose
+        tip = np.array(
+            flange_xyz_to_tip_xyz((x, y, z), (rx, ry, rz), self._tcp_offset_mm),
+            dtype=np.float64,
+        )
+        R = rotation_matrix_rpy(rx, ry, rz)
+        tip += R @ np.array([0.0, 0.0, float(descend_mm)])
+        flange_xyz = tip_xyz_to_flange_xyz(tip, (rx, ry, rz), self._tcp_offset_mm)
+        return (*flange_xyz, rx, ry, rz)
+
+    def _checked_place_descend_mm(self) -> float:
+        descend = float(self._motion.get("place_descend_mm", 0))
+        rack_depth = self._tube.get("rack_depth_mm")
+        if rack_depth is None:
+            return descend
+
+        margin = float(self._tube.get("place_depth_margin_mm", 0))
+        max_descend = max(
+            0.0,
+            self._place_bottom_clearance_mm + float(rack_depth) - margin,
+        )
+        if descend > max_descend:
+            raise MotionPlannerError(
+                "place_descend_mm="
+                f"{descend:.1f}mm 超过孔深安全下探 {max_descend:.1f}mm "
+                f"(rack_depth_mm={float(rack_depth):.1f}, "
+                f"bottom_clearance={self._place_bottom_clearance_mm:.1f}, "
+                f"margin={margin:.1f})"
+            )
+        return descend
+
+    def _carried_tip_offset_mm(self) -> np.ndarray:
+        return self._tcp_offset_mm + np.array(
+            [0.0, 0.0, self._carried_extension_below_tcp_mm],
+            dtype=np.float64,
+        )
 
     def _build_insert_pose(
         self,
@@ -248,6 +421,26 @@ class MotionPlanner:
         x, y, z, rx, ry, rz = from_pose
         safe_z = max(float(z), *(float(v) for v in clearance_z_values))
         return (x, y, safe_z, rx, ry, rz)
+
+    def _assert_vertical_tool(self, rpy: tuple[float, float, float]) -> None:
+        """确保末端工具 Z 轴接近基坐标 -Z，避免斜插孔。"""
+        R = rotation_matrix_rpy(*rpy)
+        tool_z = R @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        cos_angle = float(np.clip(tool_z @ np.array([0.0, 0.0, -1.0]), -1.0, 1.0))
+        angle_deg = float(np.degrees(np.arccos(cos_angle)))
+        if angle_deg > self._max_tool_tilt_deg:
+            raise MotionPlannerError(
+                f"末端姿态不够竖直: tool_z={tool_z.tolist()} "
+                f"tilt={angle_deg:.2f}deg > {self._max_tool_tilt_deg:.2f}deg"
+            )
+
+    def _required_carried_flange_z(self, rack_z: float) -> float:
+        tube_length = float(self._tube.get("length_mm", 0.0))
+        obstacle_top_z = float(rack_z) + tube_length
+        required_bottom_z = obstacle_top_z + self._carried_obstacle_clearance_mm
+        rx, ry, rz = self._vertical_pose[3:6]
+        delta_z = float((rotation_matrix_rpy(rx, ry, rz) @ self._carried_tip_offset_mm())[2])
+        return required_bottom_z - delta_z
 
 
 def _load_pose_list(path: str) -> list[float]:

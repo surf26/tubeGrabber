@@ -71,6 +71,7 @@ def main() -> int:
     print(f"指令: {cmd.src} -> {cmd.dst}")
     print(f"起点: scan_pose z={from_pose[2]:.1f} mm")
     print(f"tcp_offset_mm (ee): {tcp}")
+    print(f"carried_extension_below_tcp={planner.carried_extension_below_tcp_mm:.1f} mm")
     print()
 
     pick_wps = planner.plan_pick_transit(src_state, from_pose)
@@ -85,7 +86,9 @@ def main() -> int:
     )
     motion = load_config()["motion"]
     approach_h = float(motion["approach_height_mm"])
-    pick_insert_mm = float(motion["pick_insert_mm"])
+    pick_descend_mm = float(
+        motion.get("pick_descend_mm", approach_h + float(motion["pick_insert_mm"]))
+    )
     tube_z = src_state.base_xyz[2] if src_state.base_xyz else float("nan")
 
     rx, ry, rz = pick_approach[3:6]
@@ -97,8 +100,8 @@ def main() -> int:
     print("抓取细节 (TCP 高度):")
     print(f"  管口 base_z={tube_z:.1f} mm")
     print(f"  approach TCP z={tip_approach[2]:.1f} mm  (期望 ≈ base_z + {approach_h:.0f})")
-    print(f"  insert  TCP z={tip_insert[2]:.1f} mm  (期望 ≈ base_z - {pick_insert_mm:.0f})")
-    print(f"  TCP 下降量={tip_approach[2] - tip_insert[2]:.1f} mm  (期望 {approach_h + pick_insert_mm:.0f})")
+    print(f"  insert  TCP z={tip_insert[2]:.1f} mm")
+    print(f"  TCP 下降量={tip_approach[2] - tip_insert[2]:.1f} mm  (期望 {pick_descend_mm:.0f})")
     if tip_insert[2] >= tip_approach[2]:
         print("  [FAIL] insert TCP 应低于 approach")
         return 1
@@ -108,6 +111,15 @@ def main() -> int:
     print()
     print("=== 放置路段 (retreat -> dst approach) ===")
     print(format_waypoints(place_wps))
+    rack_z = dst_state.base_xyz[2] if dst_state.base_xyz else float("nan")
+    carried_high = place_wps[2].pose_6d if len(place_wps) >= 3 else place_wps[-1].pose_6d
+    high_lowest_z = planner.carried_lowest_z(carried_high)
+    obstacle_top_z = rack_z + float(load_config().get("tube", {}).get("length_mm", 0.0))
+    print(
+        f"夹持高位最低点 z={high_lowest_z:.1f} mm, "
+        f"其它试管顶部估计 z={obstacle_top_z:.1f} mm, "
+        f"净空={high_lowest_z - obstacle_top_z:.1f} mm"
+    )
 
     place_approach = place_wps[-1].pose_6d
     place_insert = planner.build_place_insert_pose(place_approach)
@@ -115,16 +127,25 @@ def main() -> int:
         place_insert,
         float(motion["place_retreat_mm"]),
     )
-    place_insert_mm = float(motion["place_insert_mm"])
-    rack_z = dst_state.base_xyz[2] if dst_state.base_xyz else float("nan")
+    place_descend_mm = float(
+        motion.get(
+            "place_descend_mm",
+            approach_h + float(motion["place_insert_mm"]),
+        )
+    )
     rx, ry, rz = place_approach[3:6]
     tip_place_a = flange_xyz_to_tip_xyz(place_approach[:3], (rx, ry, rz), tcp_off)
     tip_place_i = flange_xyz_to_tip_xyz(place_insert[:3], (rx, ry, rz), tcp_off)
+    lowest_place_a = planner.carried_lowest_z(place_approach)
+    lowest_place_i = planner.carried_lowest_z(place_insert)
     print()
     print("放置细节 (TCP 高度):")
     print(f"  架面 base_z={rack_z:.1f} mm")
     print(f"  approach TCP z={tip_place_a[2]:.1f} mm")
-    print(f"  insert  TCP z={tip_place_i[2]:.1f} mm  (期望 ≈ base_z - {place_insert_mm:.0f})")
+    print(f"  insert  TCP z={tip_place_i[2]:.1f} mm")
+    print(f"  TCP 下降量={tip_place_a[2] - tip_place_i[2]:.1f} mm  (期望 {place_descend_mm:.0f})")
+    print(f"  approach 夹持最低点 z={lowest_place_a:.1f} mm")
+    print(f"  insert  夹持最低点 z={lowest_place_i:.1f} mm")
     if tip_place_i[2] >= tip_place_a[2]:
         print("  [FAIL] insert TCP 应低于 approach")
         return 1

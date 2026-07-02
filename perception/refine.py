@@ -11,7 +11,7 @@ from perception.coord_transform import (
     pixel_to_base_mm,
     pixel_uv_to_rack_plane_mm,
 )
-from perception.yolo_detector import YoloDetector
+from perception.yolo_detector import Detection, YoloDetector
 from world.tube_registry import TubeRegistry
 
 
@@ -45,6 +45,7 @@ def refine_pick_slot(
     ambiguity_min_delta_mm: float = 2.0,
     depth_min_mm: float = 100,
     depth_max_mm: float = 800,
+    detections: list[Detection] | None = None,
 ) -> RefineResult:
     """抓取精定位：匹配 tube，Z 用 measured。"""
     return refine_slot(
@@ -63,6 +64,7 @@ def refine_pick_slot(
         ambiguity_min_delta_mm=ambiguity_min_delta_mm,
         depth_min_mm=depth_min_mm,
         depth_max_mm=depth_max_mm,
+        detections=detections,
     )
 
 
@@ -81,6 +83,7 @@ def refine_place_slot(
     ambiguity_min_delta_mm: float = 2.0,
     depth_min_mm: float = 100,
     depth_max_mm: float = 800,
+    detections: list[Detection] | None = None,
 ) -> RefineResult:
     """放置精定位：匹配 empty，Z 用 z_rack。"""
     z_rack = registry.z_rack
@@ -102,6 +105,7 @@ def refine_place_slot(
         ambiguity_min_delta_mm=ambiguity_min_delta_mm,
         depth_min_mm=depth_min_mm,
         depth_max_mm=depth_max_mm,
+        detections=detections,
     )
 
 
@@ -122,6 +126,7 @@ def refine_slot(
     ambiguity_min_delta_mm: float = 2.0,
     depth_min_mm: float = 100,
     depth_max_mm: float = 800,
+    detections: list[Detection] | None = None,
 ) -> RefineResult:
     """
     在基坐标系下匹配预期槽：refined base_xy 与 registry 预期 base_xy
@@ -137,7 +142,8 @@ def refine_slot(
         )
 
     exp_x, exp_y, _exp_z = state.base_xyz
-    detections = detector.detect(color_bgr)
+    if detections is None:
+        detections = detector.detect(color_bgr)
 
     candidates: list[RefineResult] = []
     errors: list[str] = []

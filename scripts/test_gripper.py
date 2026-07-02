@@ -18,7 +18,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="夹爪不同开度测试")
     parser.add_argument(
         "--positions",
-        default="120,125,130,135,140,145,150",
+        default="120,130,135,140,115,110",
         help="逗号分隔的夹爪开度，SDK 范围 0=全闭, 1000=全开",
     )
     parser.add_argument(

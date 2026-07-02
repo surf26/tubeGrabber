@@ -55,15 +55,15 @@ class GripperDriver:
         self._use_tool_rtu_api = True
         self._current_position = self._close_pos
 
-    def setup_modbus(self) -> None:
+    def setup_modbus(self, *, skip_initial_close: bool = False) -> None:
         """初始化夹爪通信，并闭合到默认状态。"""
         if self._backend in ("realman_sdk", "sdk", "rm_plus"):
-            self._setup_realman_sdk()
+            self._setup_realman_sdk(skip_initial_close=skip_initial_close)
             return
 
-        self._setup_legacy_modbus()
+        self._setup_legacy_modbus(skip_initial_close=skip_initial_close)
 
-    def _setup_realman_sdk(self) -> None:
+    def _setup_realman_sdk(self, *, skip_initial_close: bool = False) -> None:
         """按 Realman 官方 SDK 夹爪接口初始化：上电 + RM Plus 协议。"""
         robot = self._arm.get_robot()
 
@@ -81,9 +81,10 @@ class GripperDriver:
             )
         time.sleep(0.3)
 
-        # 非阻塞闭合到默认态；已闭合时部分 SDK/固件会返回 1 或 -4，按 demo 视为可继续。
-        self._sdk_set_position(self._close_pos, wait=False, timeout_s=self._move_timeout_s, already_closed_ok=True)
-        time.sleep(self._init_close_wait_s)
+        if not skip_initial_close:
+            # 非阻塞闭合到默认态；已闭合时部分 SDK/固件会返回 1 或 -4，按 demo 视为可继续。
+            self._sdk_set_position(self._close_pos, wait=False, timeout_s=self._move_timeout_s, already_closed_ok=True)
+            time.sleep(self._init_close_wait_s)
 
         if hasattr(robot, "rm_clear_system_err"):
             robot.rm_clear_system_err()
@@ -91,7 +92,7 @@ class GripperDriver:
         self._current_position = self._close_pos
         self._modbus_ready = True
 
-    def _setup_legacy_modbus(self) -> None:
+    def _setup_legacy_modbus(self, *, skip_initial_close: bool = False) -> None:
         """旧版：配置工具端 RS485，并按寄存器协议控制夹爪。"""
         robot = self._arm.get_robot()
 
@@ -109,9 +110,10 @@ class GripperDriver:
         self._write_register(self._reg_run_speed, self._run_speed)
         time.sleep(0.2)
 
-        self._write_register(self._reg_command, self._close_pos)
-        self._current_position = self._close_pos
-        time.sleep(self._init_close_wait_s)
+        if not skip_initial_close:
+            self._write_register(self._reg_command, self._close_pos)
+            self._current_position = self._close_pos
+            time.sleep(self._init_close_wait_s)
 
         self._modbus_ready = True
 
