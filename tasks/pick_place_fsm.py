@@ -10,7 +10,7 @@ from drivers.arm_driver import ArmDriver
 from drivers.camera_driver import CameraDriver
 from drivers.gripper_driver import GripperDriver, GripperDriverError
 from perception.coord_transform import load_T_ee_cam, load_intrinsics, pose_6d_to_matrix
-from perception.refine import refine_pick_slot, refine_place_slot
+from perception.refine import RefineError, refine_pick_slot, refine_place_slot
 from perception.slot_mapper import SlotMapper
 from perception.yolo_detector import YoloDetector
 from planning.command_validator import CommandValidator, MoveCommand
@@ -80,6 +80,9 @@ class PickPlaceFSM:
         self._registry_cfg = config.get("registry", {})
         self._vision_cfg = config.get("vision", {})
         self._safety_cfg = config.get("safety", {})
+        self._continuous_mode = bool(
+            config.get("runtime", {}).get("continuous_mode", False)
+        )
         self._verifier = OperationVerifier(config.get("verification", {}))
 
         self._K, self._dist = load_intrinsics(config["calib"]["camera_intrinsics"])
@@ -400,34 +403,54 @@ class PickPlaceFSM:
             pose_6d = self._arm.get_pose_6d()
             T_base_ee = pose_6d_to_matrix(pose_6d)
             max_dist, ambiguity_delta = self._refine_match_params()
-            result = refine_pick_slot(
-                self._cmd.src,
-                self._registry,
-                frame.color,
-                frame.depth,
-                self._refine_detector,
-                self._K,
-                self._dist,
-                self._T_ee_cam,
-                T_base_ee,
-                max_dist_xy_mm=max_dist,
-                ambiguity_min_delta_mm=ambiguity_delta,
-                depth_min_mm=self._cam_cfg.get("depth_min_mm", 100),
-                depth_max_mm=self._cam_cfg.get("depth_max_mm", 800),
-                detections=detections,
-            )
-            refined_base = result.base_xyz
-            print(
-                f"  refine dist_xy={result.dist_xy_mm:.2f}mm "
-                f"base=({result.base_xyz[0]:.1f},{result.base_xyz[1]:.1f},{result.base_xyz[2]:.1f})"
-            )
-            self._registry.update_slot(
-                self._cmd.src,
-                base_xyz=result.base_xyz,
-                pixel_uv=result.pixel_uv,
-                confidence=result.confidence,
-                z_source=result.z_source,
-            )
+            try:
+                result = refine_pick_slot(
+                    self._cmd.src,
+                    self._registry,
+                    frame.color,
+                    frame.depth,
+                    self._refine_detector,
+                    self._K,
+                    self._dist,
+                    self._T_ee_cam,
+                    T_base_ee,
+                    max_dist_xy_mm=max_dist,
+                    ambiguity_min_delta_mm=ambiguity_delta,
+                    depth_min_mm=self._cam_cfg.get("depth_min_mm", 100),
+                    depth_max_mm=self._cam_cfg.get("depth_max_mm", 800),
+                    detections=detections,
+                    projected_match_max_px=float(
+                        self._vision_cfg.get("pick_refine_projected_match_max_px", 80)
+                    ),
+                    projected_bbox_margin_px=float(
+                        self._vision_cfg.get("pick_refine_projected_bbox_margin_px", 20)
+                    ),
+                    allow_projected_fallback=bool(
+                        self._vision_cfg.get(
+                            "pick_refine_projected_fallback_enabled", True
+                        )
+                    ),
+                )
+            except RefineError as exc:
+                if not self._vision_cfg.get("pick_refine_fallback_to_global", True):
+                    self._fail(f"{self._cmd.src} 精定位失败: {exc}")
+                    return False
+                print(
+                    f"  [WARN] {self._cmd.src} 精定位失败，回退全局扫描坐标继续: {exc}"
+                )
+            else:
+                refined_base = result.base_xyz
+                print(
+                    f"  refine dist_xy={result.dist_xy_mm:.2f}mm "
+                    f"base=({result.base_xyz[0]:.1f},{result.base_xyz[1]:.1f},{result.base_xyz[2]:.1f})"
+                )
+                self._registry.update_slot(
+                    self._cmd.src,
+                    base_xyz=result.base_xyz,
+                    pixel_uv=result.pixel_uv,
+                    confidence=result.confidence,
+                    z_source=result.z_source,
+                )
         else:
             detections = []
             print(
@@ -445,6 +468,7 @@ class PickPlaceFSM:
         )
         self._viz.show_refine(refine_vis)
         approach = self._planner.build_approach_pose(refined_base)
+        print("[PICK_REFINE] 二次定位完成，下降到抓取 approach")
         self._move_pose(approach, self._arm_cfg["approach_speed"], label="pick_approach")
         self._pick_approach = approach
         self._last_pose = approach
@@ -535,45 +559,54 @@ class PickPlaceFSM:
             self._fail(f"{self._cmd.dst} 缺少全局扫描 base_xyz，无法生成 place approach")
             return False
         refined_base = dst.base_xyz
-        detections = []
         result = None
-        print(
-            f"  place refine YOLO/深度修正已临时关闭，仅拍照显示；使用现有 base="
-            f"({dst.base_xyz[0]:.1f},{dst.base_xyz[1]:.1f},{dst.base_xyz[2]:.1f})"
-        )
-
-        # 第二段放置精定位暂时只拍照显示，不做 YOLO/深度坐标修正。
-        # 这样不会因为 empty 检测、深度无效或 refine 匹配失败而中断 dry-run。
-        #
-        # detections = self._refine_detector.detect(frame.color)
-        # if self._refine_update_enabled:
-        #     pose_6d = self._arm.get_pose_6d()
-        #     T_base_ee = pose_6d_to_matrix(pose_6d)
-        #     max_dist, ambiguity_delta = self._refine_match_params()
-        #     result = refine_place_slot(
-        #         self._cmd.dst,
-        #         self._registry,
-        #         frame.color,
-        #         frame.depth,
-        #         self._refine_detector,
-        #         self._K,
-        #         self._dist,
-        #         self._T_ee_cam,
-        #         T_base_ee,
-        #         max_dist_xy_mm=max_dist,
-        #         ambiguity_min_delta_mm=ambiguity_delta,
-        #         depth_min_mm=self._cam_cfg.get("depth_min_mm", 100),
-        #         depth_max_mm=self._cam_cfg.get("depth_max_mm", 800),
-        #         detections=detections,
-        #     )
-        #     refined_base = result.base_xyz
-        #     self._registry.update_slot(
-        #         self._cmd.dst,
-        #         base_xyz=result.base_xyz,
-        #         pixel_uv=result.pixel_uv,
-        #         confidence=result.confidence,
-        #         z_source=result.z_source,
-        #     )
+        detections = self._refine_detector.detect(frame.color)
+        if self._vision_cfg.get("place_refine_update_enabled", True):
+            pose_6d = self._arm.get_pose_6d()
+            T_base_ee = pose_6d_to_matrix(pose_6d)
+            max_dist, ambiguity_delta = self._refine_match_params()
+            try:
+                result = refine_place_slot(
+                    self._cmd.dst,
+                    self._registry,
+                    frame.color,
+                    frame.depth,
+                    self._refine_detector,
+                    self._K,
+                    self._dist,
+                    self._T_ee_cam,
+                    T_base_ee,
+                    max_dist_xy_mm=max_dist,
+                    ambiguity_min_delta_mm=ambiguity_delta,
+                    depth_min_mm=self._cam_cfg.get("depth_min_mm", 100),
+                    depth_max_mm=self._cam_cfg.get("depth_max_mm", 800),
+                    detections=detections,
+                )
+            except RefineError as exc:
+                if not self._vision_cfg.get("place_refine_fallback_to_global", True):
+                    self._fail(f"{self._cmd.dst} 放置精定位失败: {exc}")
+                    return False
+                print(
+                    f"  [WARN] {self._cmd.dst} 放置精定位失败，回退第一次空槽坐标继续: {exc}"
+                )
+            else:
+                refined_base = result.base_xyz
+                print(
+                    f"  place refine dist_xy={result.dist_xy_mm:.2f}mm "
+                    f"base=({result.base_xyz[0]:.1f},{result.base_xyz[1]:.1f},{result.base_xyz[2]:.1f})"
+                )
+                self._registry.update_slot(
+                    self._cmd.dst,
+                    base_xyz=result.base_xyz,
+                    pixel_uv=result.pixel_uv,
+                    confidence=result.confidence,
+                    z_source=result.z_source,
+                )
+        else:
+            print(
+                f"  place refine 关闭，仅拍照显示；使用现有 base="
+                f"({dst.base_xyz[0]:.1f},{dst.base_xyz[1]:.1f},{dst.base_xyz[2]:.1f})"
+            )
 
         refine_vis = draw_refine_annotation(
             frame.color,
@@ -585,9 +618,48 @@ class PickPlaceFSM:
         )
         self._viz.show_refine(refine_vis)
         approach = self._planner.build_place_approach_pose(refined_base)
-        self._move_pose(approach, self._arm_cfg["approach_speed"], label="place_approach")
-        self._place_approach = approach
-        self._last_pose = approach
+        from_pose = self._last_pose or self._arm.get_pose_6d()
+        above_refined = (
+            approach[0],
+            approach[1],
+            from_pose[2],
+            approach[3],
+            approach[4],
+            approach[5],
+        )
+        dx_high = above_refined[0] - from_pose[0]
+        dy_high = above_refined[1] - from_pose[1]
+        if abs(dx_high) > 0.5 or abs(dy_high) > 0.5:
+            print(
+                "[PLACE_REFINE] 高位水平修正到 refine 后空槽正上方 "
+                f"dx={dx_high:.1f}mm dy={dy_high:.1f}mm"
+            )
+            self._move_pose(
+                above_refined,
+                self._arm_cfg["default_speed"],
+                label="place_above_refined",
+            )
+            from_pose = above_refined
+        vertical_approach = (
+            from_pose[0],
+            from_pose[1],
+            approach[2],
+            from_pose[3],
+            from_pose[4],
+            from_pose[5],
+        )
+        print(
+            "[PLACE_REFINE] 从目标正上方竖直下降到 place_approach "
+            f"dx={vertical_approach[0] - from_pose[0]:.1f}mm "
+            f"dy={vertical_approach[1] - from_pose[1]:.1f}mm"
+        )
+        self._move_pose(
+            vertical_approach,
+            self._arm_cfg["approach_speed"],
+            label="place_approach_vertical",
+        )
+        self._place_approach = vertical_approach
+        self._last_pose = vertical_approach
         return True
 
     def _do_place_release(self) -> bool:
@@ -655,6 +727,9 @@ class PickPlaceFSM:
         return True
 
     def _confirm(self, message: str) -> bool:
+        if self._continuous_mode:
+            print(f"{message} [连续模式自动继续]")
+            return True
         print(message)
         try:
             input()

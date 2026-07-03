@@ -78,7 +78,8 @@ def main() -> int:
     print("=== 抓取路段 (scan -> src approach) ===")
     print(format_waypoints(pick_wps))
 
-    pick_approach = pick_wps[-1].pose_6d
+    pick_refine = pick_wps[-1].pose_6d
+    pick_approach = planner.build_approach_pose(src_state.base_xyz)
     pick_insert = planner.build_pick_insert_pose(pick_approach)
     pick_retreat = planner.build_retreat_pose(
         pick_insert,
@@ -89,17 +90,21 @@ def main() -> int:
     pick_descend_mm = float(
         motion.get("pick_descend_mm", approach_h + float(motion["pick_insert_mm"]))
     )
+    pick_refine_h = float(motion.get("pick_refine_height_mm", motion.get("refine_height_mm", approach_h)))
     tube_z = src_state.base_xyz[2] if src_state.base_xyz else float("nan")
 
     rx, ry, rz = pick_approach[3:6]
     tcp_off = np.array(tcp)
+    tip_refine = flange_xyz_to_tip_xyz(pick_refine[:3], pick_refine[3:6], tcp_off)
     tip_approach = flange_xyz_to_tip_xyz(pick_approach[:3], (rx, ry, rz), tcp_off)
     tip_insert = flange_xyz_to_tip_xyz(pick_insert[:3], (rx, ry, rz), tcp_off)
 
     print()
     print("抓取细节 (TCP 高度):")
     print(f"  管口 base_z={tube_z:.1f} mm")
+    print(f"  refine  TCP z={tip_refine[2]:.1f} mm  (期望 ≈ base_z + {pick_refine_h:.0f})")
     print(f"  approach TCP z={tip_approach[2]:.1f} mm  (期望 ≈ base_z + {approach_h:.0f})")
+    print(f"  refine -> approach 下降={tip_refine[2] - tip_approach[2]:.1f} mm")
     print(f"  insert  TCP z={tip_insert[2]:.1f} mm")
     print(f"  TCP 下降量={tip_approach[2] - tip_insert[2]:.1f} mm  (期望 {pick_descend_mm:.0f})")
     if tip_insert[2] >= tip_approach[2]:
@@ -114,14 +119,26 @@ def main() -> int:
     rack_z = dst_state.base_xyz[2] if dst_state.base_xyz else float("nan")
     carried_high = place_wps[2].pose_6d if len(place_wps) >= 3 else place_wps[-1].pose_6d
     high_lowest_z = planner.carried_lowest_z(carried_high)
-    obstacle_top_z = rack_z + float(load_config().get("tube", {}).get("length_mm", 0.0))
+    tube_cfg = load_config().get("tube", {})
+    obstacle_top_z = rack_z + float(
+        tube_cfg.get("tube_top_above_rack_mm", tube_cfg.get("length_mm", 0.0))
+    )
     print(
         f"夹持高位最低点 z={high_lowest_z:.1f} mm, "
         f"其它试管顶部估计 z={obstacle_top_z:.1f} mm, "
         f"净空={high_lowest_z - obstacle_top_z:.1f} mm"
     )
 
-    place_approach = place_wps[-1].pose_6d
+    place_above = place_wps[-1].pose_6d
+    planned_place_approach = planner.build_place_approach_pose(dst_state.base_xyz)
+    place_approach = (
+        place_above[0],
+        place_above[1],
+        planned_place_approach[2],
+        place_above[3],
+        place_above[4],
+        place_above[5],
+    )
     place_insert = planner.build_place_insert_pose(place_approach)
     place_retreat = planner.build_retreat_pose(
         place_insert,

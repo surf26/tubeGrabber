@@ -48,6 +48,15 @@ class MotionPlanner:
         self._refine_height_mm = float(
             self._motion.get("refine_height_mm", self._approach_height_mm)
         )
+        self._pick_refine_height_mm = float(
+            self._motion.get("pick_refine_height_mm", self._refine_height_mm)
+        )
+        self._pick_transit_z_mm = self._motion.get("pick_transit_z_mm")
+        if self._pick_transit_z_mm is not None:
+            self._pick_transit_z_mm = float(self._pick_transit_z_mm)
+        self._use_direct_pick_transit = bool(
+            self._motion.get("use_direct_pick_transit", True)
+        )
         self._carried_extension_below_tcp_mm = float(
             self._tube.get(
                 "carried_extension_below_tcp_mm",
@@ -76,6 +85,9 @@ class MotionPlanner:
         self._carried_clearance_z_mm = self._motion.get("carried_clearance_z_mm")
         if self._carried_clearance_z_mm is not None:
             self._carried_clearance_z_mm = float(self._carried_clearance_z_mm)
+        self._place_carried_transit_z_mm = self._motion.get("place_carried_transit_z_mm")
+        if self._place_carried_transit_z_mm is not None:
+            self._place_carried_transit_z_mm = float(self._place_carried_transit_z_mm)
         self._default_speed = int(self._arm.get("default_speed", 20))
         self._approach_speed = int(self._arm.get("approach_speed", 10))
         self._tcp_offset_mm = load_tcp_offset_mm(config=config)
@@ -135,23 +147,19 @@ class MotionPlanner:
                 Waypoint("scan", self._scan_pose, speed=self._default_speed),
             ]
 
-        waypoints: list[Waypoint] = []
-        region = self._right_region if from_pose[0] >= 0 else self._left_region
-        side = "right" if from_pose[0] >= 0 else "left"
+        safe_z = max(float(from_pose[2]), self._scan_pose[2])
+        if self._carried_clearance_z_mm is not None:
+            safe_z = max(safe_z, self._carried_clearance_z_mm)
 
-        region_entry = _with_z(region, max(from_pose[2], region[2]))
-        waypoints.append(
-            Waypoint(f"{side}_region_return", region_entry, speed=self._default_speed)
-        )
-
-        scan_at_safe = _with_z(self._scan_pose, max(region_entry[2], self._scan_pose[2]))
-        if not _xyz_close(scan_at_safe, region_entry):
+        waypoints = [
+            Waypoint("scan_return_raise", _with_z(from_pose, safe_z), speed=self._default_speed),
+        ]
+        scan_at_safe = _with_z(self._scan_pose, safe_z)
+        if not _xyz_close(scan_at_safe, waypoints[-1].pose_6d):
             waypoints.append(
                 Waypoint("move_above_scan", scan_at_safe, speed=self._default_speed)
             )
-        waypoints.append(
-            Waypoint("scan", self._scan_pose, speed=self._approach_speed)
-        )
+        waypoints.append(Waypoint("scan", self._scan_pose, speed=self._approach_speed))
         return waypoints
 
     def plan_transit_to_slot(
@@ -205,8 +213,48 @@ class MotionPlanner:
         slot: SlotState,
         from_pose: tuple[float, float, float, float, float, float],
     ) -> list[Waypoint]:
+        if slot.base_xyz is None:
+            raise MotionPlannerError(f"{slot.slot_id} 缺少 base_xyz")
+
+        refine = self.build_pick_refine_pose(slot.base_xyz)
+        if self._use_direct_pick_transit:
+            # Empty-hand pick transit does not need the carried-tube clearance.
+            # Keeping the vertical tool pose at the scan height can make far
+            # right-side slots unreachable, so use a lower configurable
+            # transit height before descending to the refine observation pose.
+            safe_z = max(refine[2], self._pick_transit_z_mm or refine[2])
+            return [
+                Waypoint(
+                    f"{slot.slot_id}_pick_raise",
+                    _with_z(from_pose, safe_z),
+                    speed=self._default_speed,
+                ),
+                Waypoint(
+                    f"{slot.slot_id}_above_refine",
+                    _with_z(refine, safe_z),
+                    speed=self._default_speed,
+                ),
+                Waypoint(
+                    f"{slot.slot_id}_pick_refine",
+                    refine,
+                    speed=self._approach_speed,
+                ),
+            ]
+
         side = slot.slot_id.split(".", 1)[0]
-        return self.plan_transit_to_slot(slot, side, from_pose)
+        waypoints = self.plan_transit_to_slot(slot, side, from_pose)
+        if len(waypoints) >= 2:
+            waypoints[-2] = Waypoint(
+                f"{slot.slot_id}_above_refine",
+                _with_z(refine, max(waypoints[-2].pose_6d[2], refine[2])),
+                speed=waypoints[-2].speed,
+            )
+        waypoints[-1] = Waypoint(
+            f"{slot.slot_id}_pick_refine",
+            refine,
+            speed=self._approach_speed,
+        )
+        return waypoints
 
     def plan_place_transit(
         self,
@@ -241,30 +289,23 @@ class MotionPlanner:
 
         refine = self.build_place_approach_pose(slot.base_xyz)
 
-        safe_z = max(from_pose[2], self._lift_pose[2], self._scan_pose[2], refine[2])
-        if self._carried_clearance_z_mm is not None:
-            safe_z = max(safe_z, self._carried_clearance_z_mm)
-        safe_z = max(safe_z, self._required_carried_flange_z(slot.base_xyz[2]))
+        target_z = max(refine[2], self._required_carried_flange_z(slot.base_xyz[2]))
+        if self._place_carried_transit_z_mm is not None:
+            target_z = max(target_z, self._place_carried_transit_z_mm)
+        departure_z = max(from_pose[2], target_z)
         waypoints: list[Waypoint] = [
             Waypoint(
                 f"{slot.slot_id}_carry_raise",
-                _with_z(from_pose, safe_z),
-                speed=self._default_speed,
-            ),
-            Waypoint(
-                "carry_lift",
-                _with_z(self._lift_pose, safe_z),
+                _with_z(from_pose, departure_z),
                 speed=self._default_speed,
             ),
         ]
 
-        # 夹着试管时先在高位走廊横移到目标正上方，再垂直下降到放置高度。
-        above_slot = _with_z(refine, safe_z)
+        # 夹着试管时先在高位走廊横移到目标正上方。最后靠近由
+        # PLACE_REFINE 后单独做同 XY 竖直下降，避免斜向插入。
+        above_slot = _with_z(refine, target_z)
         waypoints.append(
             Waypoint(f"{slot.slot_id}_above_high", above_slot, speed=self._default_speed)
-        )
-        waypoints.append(
-            Waypoint(f"{slot.slot_id}_refine", refine, speed=self._approach_speed)
         )
         return waypoints
 
@@ -274,6 +315,13 @@ class MotionPlanner:
     ) -> tuple[float, float, float, float, float, float]:
         """视觉精定位位姿：TCP 停在目标上方 refine_height_mm。"""
         return self.build_approach_pose(base_xyz, self._refine_height_mm)
+
+    def build_pick_refine_pose(
+        self,
+        base_xyz: tuple[float, float, float],
+    ) -> tuple[float, float, float, float, float, float]:
+        """抓取二次定位观察位：比真实抓取 approach 更高，给相机留视野。"""
+        return self.build_approach_pose(base_xyz, self._pick_refine_height_mm)
 
     def build_place_approach_pose(
         self,
@@ -435,8 +483,13 @@ class MotionPlanner:
             )
 
     def _required_carried_flange_z(self, rack_z: float) -> float:
-        tube_length = float(self._tube.get("length_mm", 0.0))
-        obstacle_top_z = float(rack_z) + tube_length
+        tube_top_above_rack = float(
+            self._tube.get(
+                "tube_top_above_rack_mm",
+                self._tube.get("length_mm", 0.0),
+            )
+        )
+        obstacle_top_z = float(rack_z) + tube_top_above_rack
         required_bottom_z = obstacle_top_z + self._carried_obstacle_clearance_mm
         rx, ry, rz = self._vertical_pose[3:6]
         delta_z = float((rotation_matrix_rpy(rx, ry, rz) @ self._carried_tip_offset_mm())[2])

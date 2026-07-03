@@ -14,5 +14,5 @@ right_col_order: [1, 2, 3]
 right_row_order: ["d", "c", "b", "a"]
 
 # 空槽 Z 估算（utils/rack_height.py 使用）
-tube_above_rack_mm: 30        # 管口高出架面的估计高度，实测后调整
+tube_above_rack_mm: 22        # 试管盖/顶部高出试管架平台 2.2cm
 default_rack_plane_z_mm: null  # 无法从视觉估计时的兜底 Z，null 表示必须靠扫描

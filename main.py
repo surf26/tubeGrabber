@@ -30,7 +30,14 @@ HELP_TEXT = """
 """
 
 
-def _confirm_start() -> bool:
+def _continuous_mode(config: dict) -> bool:
+    return bool(config.get("runtime", {}).get("continuous_mode", False))
+
+
+def _confirm_start(config: dict) -> bool:
+    if _continuous_mode(config):
+        print("连续模式已开启：跳过启动 Enter 确认")
+        return True
     print("确认工作空间安全，按 Enter 开始（Ctrl+C 取消）...")
     try:
         input()
@@ -44,8 +51,8 @@ def _print_table(fsm) -> None:
     print(fsm.registry.to_table_str())
 
 
-def _run_interactive(fsm, *, skip_gripper: bool) -> int:
-    if not _confirm_start():
+def _run_interactive(fsm, *, config: dict, skip_gripper: bool) -> int:
+    if not _confirm_start(config):
         return 130
     if not fsm.connect_and_scan():
         print(f"启动失败: {fsm.fail_reason}")
@@ -126,14 +133,15 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    skip_gripper = args.no_gripper or not load_config().get("gripper", {}).get("enabled", True)
-    fsm = build_pick_place_fsm(dry_run=False, skip_gripper=skip_gripper)
+    config = load_config()
+    skip_gripper = args.no_gripper or not config.get("gripper", {}).get("enabled", True)
+    fsm = build_pick_place_fsm(config=config, dry_run=False, skip_gripper=skip_gripper)
 
     try:
         if args.command is None:
-            return _run_interactive(fsm, skip_gripper=skip_gripper)
+            return _run_interactive(fsm, config=config, skip_gripper=skip_gripper)
 
-        if not _confirm_start():
+        if not _confirm_start(config):
             return 130
 
         if args.command == "scan":

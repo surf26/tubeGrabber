@@ -201,6 +201,9 @@ class VisionDisplay:
     def __init__(self, config: dict[str, Any]) -> None:
         vis = config.get("vision", {})
         self._enabled = bool(vis.get("display_enabled", True))
+        self._continuous_mode = bool(
+            config.get("runtime", {}).get("continuous_mode", False)
+        )
         self._live_preview = bool(vis.get("live_preview_enabled", True))
         self._scan_wait_ms = int(vis.get("scan_imshow_wait_ms", 0))
         self._refine_wait_ms = int(vis.get("refine_imshow_wait_ms", 0))
@@ -280,9 +283,12 @@ class VisionDisplay:
         except Exception as exc:
             print(f"[viewer] 保存图像失败: {exc}")
 
-    @staticmethod
-    def _wait(window: str, wait_ms: int) -> None:
+    def _wait(self, window: str, wait_ms: int) -> None:
         """等待用户确认继续。"""
+        if self._continuous_mode:
+            cv2.waitKey(max(1, wait_ms))
+            return
+
         if wait_ms > 0:
             cv2.waitKey(wait_ms)
             return

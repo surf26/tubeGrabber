@@ -46,6 +46,9 @@ def refine_pick_slot(
     depth_min_mm: float = 100,
     depth_max_mm: float = 800,
     detections: list[Detection] | None = None,
+    projected_match_max_px: float = 80.0,
+    projected_bbox_margin_px: float = 20.0,
+    allow_projected_fallback: bool = True,
 ) -> RefineResult:
     """抓取精定位：匹配 tube，Z 用 measured。"""
     return refine_slot(
@@ -65,6 +68,9 @@ def refine_pick_slot(
         depth_min_mm=depth_min_mm,
         depth_max_mm=depth_max_mm,
         detections=detections,
+        projected_match_max_px=projected_match_max_px,
+        projected_bbox_margin_px=projected_bbox_margin_px,
+        allow_projected_fallback=allow_projected_fallback,
     )
 
 
@@ -127,6 +133,9 @@ def refine_slot(
     depth_min_mm: float = 100,
     depth_max_mm: float = 800,
     detections: list[Detection] | None = None,
+    projected_match_max_px: float = 80.0,
+    projected_bbox_margin_px: float = 20.0,
+    allow_projected_fallback: bool = True,
 ) -> RefineResult:
     """
     在基坐标系下匹配预期槽：refined base_xy 与 registry 预期 base_xy
@@ -141,7 +150,14 @@ def refine_slot(
             f"{slot_id} 预期 klass={expected_klass}，当前 registry 为 {state.klass}"
         )
 
-    exp_x, exp_y, _exp_z = state.base_xyz
+    exp_x, exp_y, exp_z = state.base_xyz
+    exp_uv: tuple[float, float] | None = None
+    try:
+        exp_uv = base_xyz_to_pixel_uv(state.base_xyz, K, dist, T_ee_cam, T_base_ee)
+    except CoordTransformError as exc:
+        errors_project = f"预期点投影失败: {exc}"
+    else:
+        errors_project = ""
     if detections is None:
         detections = detector.detect(color_bgr)
 
@@ -150,6 +166,7 @@ def refine_slot(
     for det in detections:
         if det.class_name != expected_klass:
             continue
+        matched_by_projection = False
         try:
             if z_override is not None:
                 meas_x, meas_y, meas_z = pixel_uv_to_rack_plane_mm(
@@ -176,7 +193,20 @@ def refine_slot(
                 meas_x, meas_y, meas_z = float(p_base[0]), float(p_base[1]), float(p_base[2])
         except CoordTransformError as exc:
             errors.append(f"uv={det.center_uv}: {exc}")
-            continue
+            if (
+                not allow_projected_fallback
+                or z_override is not None
+                or exp_uv is None
+                or not _detection_matches_projected_target(
+                    det,
+                    exp_uv,
+                    max_center_dist_px=projected_match_max_px,
+                    bbox_margin_px=projected_bbox_margin_px,
+                )
+            ):
+                continue
+            meas_x, meas_y, meas_z = float(exp_x), float(exp_y), float(exp_z)
+            matched_by_projection = True
 
         dist_xy = float(np.hypot(meas_x - exp_x, meas_y - exp_y))
         if dist_xy > max_dist_xy_mm:
@@ -187,7 +217,7 @@ def refine_slot(
             z_source = "rack_plane"
         else:
             base_xyz = (meas_x, meas_y, meas_z)
-            z_source = "measured"
+            z_source = "projected_global" if matched_by_projection else "measured"
 
         candidates.append(
             RefineResult(
@@ -202,20 +232,84 @@ def refine_slot(
         )
 
     if not candidates:
-        detail = "; ".join(errors[:3]) if errors else "无匹配检测"
+        detail_items = errors[:3]
+        if errors_project:
+            detail_items.append(errors_project)
+        detail = "; ".join(detail_items) if detail_items else "无匹配检测"
         raise RefineError(
             f"{slot_id} 精定位失败: {expected_klass} 在 base_xy ±{max_dist_xy_mm}mm "
             f"内无有效检测 (预期 {exp_x:.1f},{exp_y:.1f}) — {detail}"
         )
 
-    best = min(candidates, key=lambda c: c.dist_xy_mm)
-    if len(candidates) > 1:
-        second = sorted(candidates, key=lambda c: c.dist_xy_mm)[1]
+    ordered = sorted(candidates, key=lambda c: _candidate_sort_key(c, exp_uv))
+    best = ordered[0]
+    if len(candidates) > 1 and best.z_source != "projected_global":
+        second = ordered[1]
         delta = second.dist_xy_mm - best.dist_xy_mm
-        if delta < ambiguity_min_delta_mm:
+        if second.z_source != "projected_global" and delta < ambiguity_min_delta_mm:
             raise RefineError(
                 f"{slot_id} 精定位歧义: 最近 {best.dist_xy_mm:.1f}mm vs "
                 f"次近 {second.dist_xy_mm:.1f}mm (差距 {delta:.1f}mm < "
                 f"{ambiguity_min_delta_mm:.1f}mm)"
             )
     return best
+
+
+def base_xyz_to_pixel_uv(
+    base_xyz: tuple[float, float, float],
+    K: np.ndarray,
+    dist: np.ndarray,
+    T_ee_cam: np.ndarray,
+    T_base_ee: np.ndarray,
+) -> tuple[float, float]:
+    """把第一次扫描得到的基坐标点投影到当前相机图像。"""
+    T_base_cam = T_base_ee @ T_ee_cam
+    T_cam_base = np.linalg.inv(T_base_cam)
+    p_base = np.array([base_xyz[0], base_xyz[1], base_xyz[2], 1.0], dtype=np.float64)
+    p_cam = T_cam_base @ p_base
+    if p_cam[2] <= 1e-6:
+        raise CoordTransformError("预期点在相机后方")
+
+    import cv2
+
+    pts, _ = cv2.projectPoints(
+        p_cam[:3].reshape(1, 1, 3),
+        np.zeros(3, dtype=np.float64),
+        np.zeros(3, dtype=np.float64),
+        K,
+        dist,
+    )
+    u, v = pts.reshape(-1, 2)[0]
+    return float(u), float(v)
+
+
+def _detection_matches_projected_target(
+    det: Detection,
+    projected_uv: tuple[float, float],
+    *,
+    max_center_dist_px: float,
+    bbox_margin_px: float,
+) -> bool:
+    u, v = projected_uv
+    x1, y1, x2, y2 = det.bbox
+    in_bbox = (
+        x1 - bbox_margin_px <= u <= x2 + bbox_margin_px
+        and y1 - bbox_margin_px <= v <= y2 + bbox_margin_px
+    )
+    center_dist = float(np.hypot(det.center_uv[0] - u, det.center_uv[1] - v))
+    return in_bbox or center_dist <= max_center_dist_px
+
+
+def _candidate_sort_key(
+    result: RefineResult,
+    projected_uv: tuple[float, float] | None,
+) -> tuple[bool, float, float]:
+    if result.z_source != "projected_global":
+        return (False, result.dist_xy_mm, -result.confidence)
+    if projected_uv is None:
+        pixel_dist = 1e9
+    else:
+        pixel_dist = float(
+            np.hypot(result.pixel_uv[0] - projected_uv[0], result.pixel_uv[1] - projected_uv[1])
+        )
+    return (True, pixel_dist, -result.confidence)
