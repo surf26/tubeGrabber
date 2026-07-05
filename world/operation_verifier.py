@@ -32,10 +32,11 @@ class VerificationResult:
     def summary(self) -> str:
         if self.ok:
             detail = ", ".join(
-                f"{c.slot_id}={c.actual_klass}({c.confidence:.2f})"
+                f"{c.slot_id}={c.actual_klass}(conf={c.confidence:.2f})"
                 for c in self.checks
             )
-            return f"{self.stage} OK: {detail}"
+            tag = "VERIFY_PICK" if self.stage == "pick" else "VERIFY_PLACE"
+            return f"{tag} OK: {detail}"
         return "; ".join(c.reason for c in self.checks if not c.ok)
 
 
@@ -93,13 +94,13 @@ class OperationVerifier:
                 reason = "ok"
             elif not klass_ok:
                 reason = (
-                    f"{stage_key} 验证失败: {slot_id} 应为 {expected}，"
-                    f"当前为 {state.klass}"
+                    f"VERIFY_{stage_key.upper()} failed: {slot_id} "
+                    f"expected={expected}, actual={state.klass}"
                 )
             else:
                 reason = (
-                    f"{stage_key} 验证失败: {slot_id}={state.klass} "
-                    f"conf={state.confidence:.2f} < {min_conf:.2f}"
+                    f"VERIFY_{stage_key.upper()} failed: {slot_id} "
+                    f"conf={state.confidence:.2f} < min_confidence={min_conf:.2f}"
                 )
 
             checks.append(

@@ -15,6 +15,17 @@ from perception.slot_mapper import SlotMapper
 from perception.yolo_detector import YoloDetector
 from planning.command_validator import CommandValidator, MoveCommand
 from planning.motion_planner import MotionPlanner, Waypoint, format_waypoints
+from utils.cli_output import (
+    AUTO_CONT,
+    PROMPT_GRASP,
+    err,
+    move_done,
+    move_line,
+    ok,
+    stage,
+    sub,
+    warn,
+)
 from utils.config_loader import load_yaml
 from utils.vision_viz import VisionDisplay, draw_refine_annotation, draw_scan_annotation
 from world.operation_verifier import OperationVerifier
@@ -136,45 +147,6 @@ class PickPlaceFSM:
             except Exception:
                 pass
 
-    def run_interactive(self) -> None:
-        """扫描一次后循环等待用户指令。"""
-        if not self._bootstrap():
-            return
-        self._state = State.WAIT_CMD
-        print(self._registry.to_table_str())
-        print("\n输入 'src dst' 执行搬运，'scan' 重扫，'quit' 退出")
-        while self._state != State.FAILED:
-            if self._state == State.WAIT_CMD:
-                try:
-                    text = input("> ").strip()
-                except (EOFError, KeyboardInterrupt):
-                    print("\n退出")
-                    break
-                if not text:
-                    continue
-                if text.lower() in ("quit", "q", "exit"):
-                    break
-                if text.lower() == "scan":
-                    self._state = State.SCAN_GLOBAL
-                    self.step()
-                    print(self._registry.to_table_str())
-                    self._state = State.WAIT_CMD
-                    continue
-                self._cmd, ok, reason = self._validator.parse_and_validate(
-                    text, self._registry
-                )
-                if not ok:
-                    print(f"指令无效: {reason}")
-                    continue
-                self._state = State.VALIDATE_CMD
-            self.step()
-            if self._state == State.DONE:
-                print("完成")
-                self._state = State.WAIT_CMD
-            elif self._state == State.FAILED:
-                print(f"失败: {self._fail_reason}")
-                self._state = State.WAIT_CMD
-
     def run_dry_move(self, cmd_text: str) -> bool:
         """空跑：移动 + 精定位，不夹取。"""
         was_dry = self._dry_run
@@ -206,17 +178,17 @@ class PickPlaceFSM:
             self._skip_gripper = True
 
         try:
-            self._cmd, ok, reason = self._validator.parse_and_validate(
+            self._cmd, valid, reason = self._validator.parse_and_validate(
                 cmd_text, self._registry
             )
-            if not ok or self._cmd is None:
-                self._fail(f"指令无效: {reason}")
+            if not valid or self._cmd is None:
+                self._fail(f"invalid command: {reason}")
                 return False
             dst_state = self._registry.get(self._cmd.dst)
             self._pre_pick_place_base_xyz = dst_state.base_xyz
 
-            label = "dry-run" if dry else "move"
-            print(f"{label}: {self._cmd.src} -> {self._cmd.dst}")
+            label = "DRY_RUN" if dry else "MOVE"
+            stage(label, f"{self._cmd.src} -> {self._cmd.dst}")
 
             if dry:
                 sequence = [
@@ -269,7 +241,7 @@ class PickPlaceFSM:
         }
         handler = handlers.get(self._state)
         if handler is None:
-            self._fail(f"未处理状态: {self._state.value}")
+            self._fail(f"unhandled state: {self._state.value}")
             return False
         try:
             return handler()
@@ -285,7 +257,7 @@ class PickPlaceFSM:
         return self.step()
 
     def _do_check_hw(self) -> bool:
-        print("[CHECK_HW] 连接硬件...")
+        stage("CHECK_HW", "connecting arm, camera, gripper")
         if not self._arm.is_connected():
             self._arm.connect()
         self._camera.connect()
@@ -295,22 +267,25 @@ class PickPlaceFSM:
                 if self._gripper is None:
                     self._gripper = GripperDriver(self._arm, self._config["gripper"])
                 self._gripper.setup_modbus()
-                print("[CHECK_HW] 夹爪已发送初始化闭合到 0")
+                close_pos = int(self._config["gripper"].get("close_position", 0))
+                sub(f"gripper init OK, close_position={close_pos}")
             except GripperDriverError as exc:
                 if not self._dry_run:
-                    self._fail(f"夹爪连接失败: {exc}")
+                    self._fail(f"gripper connect failed: {exc}")
                     return False
-                print(f"[CHECK_HW] 夹爪连接失败，dry-run 已跳过夹爪: {exc}")
+                warn(f"gripper unavailable, skipped in dry-run: {exc}")
                 self._skip_gripper = True
                 self._gripper = None
         else:
-            print("[CHECK_HW] 已配置跳过夹爪")
-        self._last_pose = self._arm.get_pose_6d()
-        print("[CHECK_HW] OK")
+            sub("gripper skipped (--no-gripper or config)")
+        pose = self._arm.get_pose_6d()
+        self._last_pose = pose
+        sub(f"current pose xyz=({pose[0]:.1f},{pose[1]:.1f},{pose[2]:.1f}) mm")
+        stage("CHECK_HW", "OK")
         return True
 
     def _do_scan_global(self) -> bool:
-        print("[SCAN_GLOBAL] 扫描 24 槽...")
+        stage("SCAN_GLOBAL", "scanning 24 slots")
         if self._need_direct_scan:
             # 冷启动：从当前任意姿态直达 scan_pose，避免先抬 Z 导致不可达
             waypoints = self._planner.plan_to_scan(None)
@@ -319,7 +294,7 @@ class PickPlaceFSM:
             from_pose = self._last_pose or self._planner.scan_pose
             waypoints = self._planner.plan_to_scan(from_pose)
         print(format_waypoints(waypoints))
-        print("[SCAN_GLOBAL] 路径已规划，自动开始移动")
+        sub("waypoints planned, moving")
         self._execute_waypoints(waypoints, phase="scan")
 
         self._arm.wait_motion_done()
@@ -347,7 +322,8 @@ class PickPlaceFSM:
             default_z_mm=self._rack_layout.get("default_rack_plane_z_mm"),
         )
         self._registry.update_from_scan(observations, z_rack)
-        print(f"[SCAN_GLOBAL] z_rack={z_rack:.1f} mm, tubes={len(self._registry.find_tube_slots())}")
+        tube_count = len(self._registry.find_tube_slots())
+        sub(f"z_rack={z_rack:.1f} mm, tube_count={tube_count}")
 
         annotated = draw_scan_annotation(
             frame.color,
@@ -363,13 +339,13 @@ class PickPlaceFSM:
 
     def _do_validate_cmd(self) -> bool:
         if self._cmd is None:
-            self._fail("无搬运指令")
+            self._fail("no move command")
             return False
-        ok, reason = self._validator.validate(self._cmd, self._registry)
-        if not ok:
+        valid, reason = self._validator.validate(self._cmd, self._registry)
+        if not valid:
             self._fail(reason)
             return False
-        print(f"[VALIDATE_CMD] {self._cmd.src} -> {self._cmd.dst} OK")
+        sub(f"cmd valid: {self._cmd.src} -> {self._cmd.dst}")
         return True
 
     def _do_pick_transit(self) -> bool:
@@ -377,16 +353,16 @@ class PickPlaceFSM:
         src = self._registry.get(self._cmd.src)
         from_pose = self._last_pose or self._planner.scan_pose
         waypoints = self._planner.plan_pick_transit(src, from_pose)
-        print(f"[PICK_TRANSIT] -> {self._cmd.src}")
+        stage("PICK_TRANSIT", f"transit to {self._cmd.src}")
         print(format_waypoints(waypoints))
-        print("[PICK_TRANSIT] 路径已规划，自动开始移动（移动过程中无需按 Enter）")
+        sub("waypoints planned, moving")
         self._execute_waypoints(waypoints, phase="pick_transit")
         self._last_pose = waypoints[-1].pose_6d
         return True
 
     def _do_pick_refine(self) -> bool:
         assert self._cmd is not None
-        print(f"[PICK_REFINE] {self._cmd.src}")
+        stage("PICK_REFINE", f"refine slot {self._cmd.src}")
         self._arm.wait_motion_done()
         time.sleep(0.2)
         self._viz.stop_live()
@@ -394,7 +370,7 @@ class PickPlaceFSM:
 
         src = self._registry.get(self._cmd.src)
         if src.base_xyz is None:
-            self._fail(f"{self._cmd.src} 缺少全局扫描 base_xyz，无法生成 pick approach")
+            self._fail(f"{self._cmd.src} missing base_xyz from SCAN_GLOBAL")
             return False
         result = None
         refined_base = src.base_xyz
@@ -433,16 +409,15 @@ class PickPlaceFSM:
                 )
             except RefineError as exc:
                 if not self._vision_cfg.get("pick_refine_fallback_to_global", True):
-                    self._fail(f"{self._cmd.src} 精定位失败: {exc}")
+                    self._fail(f"{self._cmd.src} refine failed: {exc}")
                     return False
-                print(
-                    f"  [WARN] {self._cmd.src} 精定位失败，回退全局扫描坐标继续: {exc}"
-                )
+                warn(f"{self._cmd.src} refine failed, fallback to scan base_xyz: {exc}")
             else:
                 refined_base = result.base_xyz
-                print(
-                    f"  refine dist_xy={result.dist_xy_mm:.2f}mm "
-                    f"base=({result.base_xyz[0]:.1f},{result.base_xyz[1]:.1f},{result.base_xyz[2]:.1f})"
+                sub(
+                    f"base_xyz updated: dist_xy={result.dist_xy_mm:.2f} mm, "
+                    f"xyz=({result.base_xyz[0]:.1f},{result.base_xyz[1]:.1f},"
+                    f"{result.base_xyz[2]:.1f}), conf={result.confidence:.3f}"
                 )
                 self._registry.update_slot(
                     self._cmd.src,
@@ -453,8 +428,8 @@ class PickPlaceFSM:
                 )
         else:
             detections = []
-            print(
-                f"  pick refine YOLO/深度修正关闭，仅拍照显示；使用全局扫描 base="
+            sub(
+                f"refine_update disabled, use scan base_xyz="
                 f"({src.base_xyz[0]:.1f},{src.base_xyz[1]:.1f},{src.base_xyz[2]:.1f})"
             )
 
@@ -468,7 +443,7 @@ class PickPlaceFSM:
         )
         self._viz.show_refine(refine_vis)
         approach = self._planner.build_approach_pose(refined_base)
-        print("[PICK_REFINE] 二次定位完成，下降到抓取 approach")
+        sub(f"descend to pick_approach, speed={self._arm_cfg['approach_speed']}")
         self._move_pose(approach, self._arm_cfg["approach_speed"], label="pick_approach")
         self._pick_approach = approach
         self._last_pose = approach
@@ -477,35 +452,34 @@ class PickPlaceFSM:
     def _do_pick_grasp(self) -> bool:
         assert self._cmd is not None
         if self._pick_approach is None:
-            self._fail("缺少 pick approach")
+            self._fail("missing pick_approach pose")
             return False
 
-        print("[PICK_GRASP] 抓取...")
+        stage("PICK_GRASP", "grasp")
         if not self._dry_run and not self._skip_gripper and self._gripper is None:
-            self._fail("无夹爪")
+            self._fail("gripper not available")
             return False
         pick_open = int(self._config["gripper"].get("pick_open_position", 135))
         pick_grip = int(self._config["gripper"].get("grip_position", 110))
         descend = float(self._motion.get("pick_descend_mm", 30))
+        retreat_mm = float(self._motion.get("pick_retreat_mm", 100))
         if self._dry_run or self._skip_gripper:
-            print(f"[PICK_GRASP] dry-run/no-gripper: 跳过夹爪张开 {pick_open}")
+            sub("dry-run: skip gripper open")
         else:
-            print(f"[PICK_GRASP] 夹爪张开到 {pick_open}")
+            sub(f"gripper open, pick_open_position={pick_open}")
             self._gripper.open_for_pick()
-        if not self._confirm("夹爪已张开，确认下探姿态安全，按 Enter 下探夹取（Ctrl+C 取消）..."):
+        if not self._confirm(PROMPT_GRASP):
             return False
         insert = self._planner.build_pick_insert_pose(self._pick_approach)
-        print(f"[PICK_GRASP] 从 approach 下探 {descend:.1f}mm")
+        sub(f"descend pick_descend_mm={descend:.1f}, speed={self._arm_cfg['approach_speed']}")
         self._move_pose(insert, self._arm_cfg["approach_speed"], label="pick_insert")
         if self._dry_run or self._skip_gripper:
-            print(f"[PICK_GRASP] dry-run/no-gripper: 跳过夹爪夹住 {pick_grip}")
+            sub("dry-run: skip gripper close")
         else:
-            print(f"[PICK_GRASP] 夹爪夹住到 {pick_grip}")
+            sub(f"gripper close, grip_position={pick_grip}")
             self._gripper.move_to(pick_grip)
-        retreat = self._planner.build_retreat_pose(
-            insert,
-            float(self._motion.get("pick_retreat_mm", 100)),
-        )
+        retreat = self._planner.build_retreat_pose(insert, retreat_mm)
+        sub(f"retreat pick_retreat_mm={retreat_mm:.1f}, speed={self._arm_cfg['default_speed']}")
         self._move_pose(retreat, self._arm_cfg["default_speed"], label="pick_retreat")
         self._registry.update_slot(
             self._cmd.src, klass="unknown", z_source="pending_verify"
@@ -515,10 +489,10 @@ class PickPlaceFSM:
 
     def _do_verify_pick(self) -> bool:
         if self._dry_run:
-            print("[VERIFY_PICK] dry-run 跳过")
+            sub("dry-run: skip VERIFY_PICK")
             return True
         assert self._cmd is not None
-        print("[VERIFY_PICK] 回 scan 验证...")
+        stage("VERIFY_PICK", "rescan and verify src slot")
         self._do_scan_global()
         result = self._verifier.verify(
             "pick",
@@ -529,7 +503,7 @@ class PickPlaceFSM:
         if not result.ok:
             self._fail(result.summary())
             return False
-        print(f"[VERIFY_PICK] {result.summary()}")
+        sub(result.summary())
         self._restore_pre_pick_place_target()
         return True
 
@@ -539,16 +513,16 @@ class PickPlaceFSM:
         dst = self._registry.get(self._cmd.dst)
         from_pose = self._last_pose or self._planner.scan_pose
         waypoints = self._planner.plan_place_transit(dst, from_pose)
-        print(f"[PLACE_TRANSIT] -> {self._cmd.dst}")
+        stage("PLACE_TRANSIT", f"transit to {self._cmd.dst}")
         print(format_waypoints(waypoints))
-        print("[PLACE_TRANSIT] 路径已规划，自动开始移动（移动过程中无需按 Enter）")
+        sub("waypoints planned, moving")
         self._execute_waypoints(waypoints, phase="place_transit")
         self._last_pose = waypoints[-1].pose_6d
         return True
 
     def _do_place_refine(self) -> bool:
         assert self._cmd is not None
-        print(f"[PLACE_REFINE] {self._cmd.dst}")
+        stage("PLACE_REFINE", f"refine slot {self._cmd.dst}")
         self._arm.wait_motion_done()
         time.sleep(0.2)
         self._viz.stop_live()
@@ -556,7 +530,7 @@ class PickPlaceFSM:
 
         dst = self._registry.get(self._cmd.dst)
         if dst.base_xyz is None:
-            self._fail(f"{self._cmd.dst} 缺少全局扫描 base_xyz，无法生成 place approach")
+            self._fail(f"{self._cmd.dst} missing base_xyz from SCAN_GLOBAL")
             return False
         refined_base = dst.base_xyz
         result = None
@@ -584,16 +558,15 @@ class PickPlaceFSM:
                 )
             except RefineError as exc:
                 if not self._vision_cfg.get("place_refine_fallback_to_global", True):
-                    self._fail(f"{self._cmd.dst} 放置精定位失败: {exc}")
+                    self._fail(f"{self._cmd.dst} refine failed: {exc}")
                     return False
-                print(
-                    f"  [WARN] {self._cmd.dst} 放置精定位失败，回退第一次空槽坐标继续: {exc}"
-                )
+                warn(f"{self._cmd.dst} refine failed, fallback to scan base_xyz: {exc}")
             else:
                 refined_base = result.base_xyz
-                print(
-                    f"  place refine dist_xy={result.dist_xy_mm:.2f}mm "
-                    f"base=({result.base_xyz[0]:.1f},{result.base_xyz[1]:.1f},{result.base_xyz[2]:.1f})"
+                sub(
+                    f"base_xyz updated: dist_xy={result.dist_xy_mm:.2f} mm, "
+                    f"xyz=({result.base_xyz[0]:.1f},{result.base_xyz[1]:.1f},"
+                    f"{result.base_xyz[2]:.1f}), conf={result.confidence:.3f}"
                 )
                 self._registry.update_slot(
                     self._cmd.dst,
@@ -603,8 +576,8 @@ class PickPlaceFSM:
                     z_source=result.z_source,
                 )
         else:
-            print(
-                f"  place refine 关闭，仅拍照显示；使用现有 base="
+            sub(
+                f"place_refine_update disabled, use base_xyz="
                 f"({dst.base_xyz[0]:.1f},{dst.base_xyz[1]:.1f},{dst.base_xyz[2]:.1f})"
             )
 
@@ -630,10 +603,7 @@ class PickPlaceFSM:
         dx_high = above_refined[0] - from_pose[0]
         dy_high = above_refined[1] - from_pose[1]
         if abs(dx_high) > 0.5 or abs(dy_high) > 0.5:
-            print(
-                "[PLACE_REFINE] 高位水平修正到 refine 后空槽正上方 "
-                f"dx={dx_high:.1f}mm dy={dy_high:.1f}mm"
-            )
+            sub(f"XY correction: dx={dx_high:.1f} mm, dy={dy_high:.1f} mm")
             self._move_pose(
                 above_refined,
                 self._arm_cfg["default_speed"],
@@ -648,11 +618,7 @@ class PickPlaceFSM:
             from_pose[4],
             from_pose[5],
         )
-        print(
-            "[PLACE_REFINE] 从目标正上方竖直下降到 place_approach "
-            f"dx={vertical_approach[0] - from_pose[0]:.1f}mm "
-            f"dy={vertical_approach[1] - from_pose[1]:.1f}mm"
-        )
+        sub(f"descend to place_approach, speed={self._arm_cfg['approach_speed']}")
         self._move_pose(
             vertical_approach,
             self._arm_cfg["approach_speed"],
@@ -665,37 +631,36 @@ class PickPlaceFSM:
     def _do_place_release(self) -> bool:
         assert self._cmd is not None
         if self._place_approach is None:
-            self._fail("缺少 place approach")
+            self._fail("missing place_approach pose")
             return False
 
-        print("[PLACE_RELEASE] 放置...")
+        stage("PLACE_RELEASE", "insert and release")
         if not self._dry_run and not self._skip_gripper and self._gripper is None:
-            self._fail("无夹爪")
+            self._fail("gripper not available")
             return False
         insert = self._planner.build_place_insert_pose(self._place_approach)
         min_insert_z = float(self._safety_cfg.get("min_place_insert_flange_z", 150))
         if insert[2] < min_insert_z:
             self._fail(
-                f"place_insert 法兰 Z={insert[2]:.1f}mm < {min_insert_z:.1f}mm，拒绝下探"
+                f"place_insert flange Z={insert[2]:.1f} mm < "
+                f"min_place_insert_flange_z={min_insert_z:.1f} mm"
             )
             return False
         self._move_pose(insert, self._arm_cfg["approach_speed"], label="place_insert")
         release_open = int(self._config["gripper"].get("release_open_position", 120))
+        retreat_mm = float(self._motion.get("place_retreat_mm", 100))
         if self._dry_run or self._skip_gripper:
-            print(f"[PLACE_RELEASE] dry-run/no-gripper: 跳过夹爪松开 {release_open}")
+            sub("dry-run: skip gripper release")
         else:
-            print(f"[PLACE_RELEASE] 夹爪张开到 {release_open}")
+            sub(f"gripper open, release_open_position={release_open}")
             self._gripper.open_for_release()
-        retreat = self._planner.build_retreat_pose(
-            insert,
-            float(self._motion.get("place_retreat_mm", 100)),
-        )
-        print("[PLACE_RELEASE] 保持松开状态，竖直上提到安全位")
+        retreat = self._planner.build_retreat_pose(insert, retreat_mm)
+        sub(f"retreat place_retreat_mm={retreat_mm:.1f}, speed={self._arm_cfg['default_speed']}")
         self._move_pose(retreat, self._arm_cfg["default_speed"], label="place_retreat")
         if self._dry_run or self._skip_gripper:
-            print("[PLACE_RELEASE] dry-run/no-gripper: 跳过夹爪合到 0")
+            sub("dry-run: skip gripper reset")
         else:
-            print("[PLACE_RELEASE] 已到安全位，夹爪合到 0")
+            sub("gripper reset, close_position=0")
             self._gripper.close(wait=False)
         self._registry.update_slot(
             self._cmd.dst, klass="unknown", z_source="pending_verify"
@@ -705,10 +670,10 @@ class PickPlaceFSM:
 
     def _do_verify_place(self) -> bool:
         if self._dry_run:
-            print("[VERIFY_PLACE] dry-run 跳过")
+            sub("dry-run: skip VERIFY_PLACE")
             return True
         assert self._cmd is not None
-        print("[VERIFY_PLACE] 回 scan 验证...")
+        stage("VERIFY_PLACE", "rescan and verify dst slot")
         self._do_scan_global()
         result = self._verifier.verify(
             "place",
@@ -719,23 +684,23 @@ class PickPlaceFSM:
         if not result.ok:
             self._fail(result.summary())
             return False
-        print(f"[VERIFY_PLACE] {result.summary()}")
+        sub(result.summary())
         return True
 
     def _do_done(self) -> bool:
-        print("[DONE]")
+        stage("DONE", "OK")
         return True
 
     def _confirm(self, message: str) -> bool:
         if self._continuous_mode:
-            print(f"{message} [连续模式自动继续]")
+            print(f"{message}{AUTO_CONT}")
             return True
         print(message)
         try:
             input()
             return True
         except KeyboardInterrupt:
-            self._fail("用户取消")
+            self._fail("cancelled by user")
             return False
         except EOFError:
             return True
@@ -748,8 +713,8 @@ class PickPlaceFSM:
                 )
                 if wp.pose_6d[2] < min_approach_z:
                     raise FSMError(
-                        f"{wp.label} 法兰 Z={wp.pose_6d[2]:.1f}mm < "
-                        f"{min_approach_z:.1f}mm，拒绝低位放置"
+                        f"{wp.label} flange Z={wp.pose_6d[2]:.1f} mm < "
+                        f"min_place_approach_flange_z={min_approach_z:.1f} mm"
                     )
             speed = wp.speed or self._arm_cfg["default_speed"]
             self._move_pose(wp.pose_6d, speed, label=f"{phase}/{wp.label}")
@@ -763,14 +728,15 @@ class PickPlaceFSM:
     ) -> None:
         cur = self._arm.get_pose_6d()
         delta_mm = max(abs(cur[i] - pose[i]) for i in range(3))
-        print(
-            f"  move_p [{label}] "
-            f"xyz=({pose[0]:.1f},{pose[1]:.1f},{pose[2]:.1f}) "
-            f"rpy=({pose[3]:.3f},{pose[4]:.3f},{pose[5]:.3f}) "
-            f"| 当前xyz=({cur[0]:.1f},{cur[1]:.1f},{cur[2]:.1f}) Δ≈{delta_mm:.1f}mm"
+        move_line(
+            label,
+            pose,
+            cur_xyz=cur[:3],
+            delta_mm=delta_mm,
+            speed=speed,
         )
         if self._near_pose(pose):
-            print(f"  move_p [{label}] 已在目标附近，跳过")
+            sub(f"move_p [{label}] already at target, skipped")
             return
 
         self._viz.start_live()
@@ -781,18 +747,14 @@ class PickPlaceFSM:
                 if self._near_pose(pose, tol_mm=2.0, tol_rad=0.08):
                     after = self._arm.get_pose_6d()
                     moved = max(abs(after[i] - cur[i]) for i in range(3))
-                    print(
-                        f"  move_p [{label}] 到位 "
-                        f"xyz=({after[0]:.1f},{after[1]:.1f},{after[2]:.1f}) "
-                        f"移动量≈{moved:.1f}mm"
-                    )
+                    move_done(label, after[:3], moved)
                     return
                 time.sleep(0.1)
             after = self._arm.get_pose_6d()
             raise FSMError(
-                f"move_p [{label}] 未到目标位："
-                f"目标=({pose[0]:.1f},{pose[1]:.1f},{pose[2]:.1f}) "
-                f"当前=({after[0]:.1f},{after[1]:.1f},{after[2]:.1f})"
+                f"move_p [{label}] timeout: "
+                f"target=({pose[0]:.1f},{pose[1]:.1f},{pose[2]:.1f}) "
+                f"current=({after[0]:.1f},{after[1]:.1f},{after[2]:.1f})"
             )
         finally:
             self._viz.stop_live()
@@ -832,9 +794,9 @@ class PickPlaceFSM:
                 z_source="pre_pick_scan",
             )
         except Exception as exc:
-            print(f"[WARN] 恢复抓前目标坐标失败: {exc}")
+            warn(f"restore pre-pick dst base_xyz failed: {exc}")
 
     def _fail(self, reason: str) -> None:
         self._fail_reason = reason
         self._state = State.FAILED
-        print(f"[FAILED] {reason}")
+        err(reason)

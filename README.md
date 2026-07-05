@@ -24,12 +24,12 @@ Realman RM-65B · Orbbec 336L 腕部相机 · RS485 平行夹爪 · YOLO（`empt
 ```text
 ┌─────────────────────────────────────────────────────────────┐
 │  main.py / PickPlaceFSM                                     │
-├──────────────┬──────────────┬──────────────┬──────────────┤
-│  planning/   │  world/      │  perception/ │  drivers/    │
-│  指令校验    │  状态表      │  YOLO        │  机械臂      │
-│  路点规划    │  registry    │  槽位映射    │  相机        │
-│              │              │  精定位      │  夹爪        │
-└──────────────┴──────────────┴──────────────┴──────────────┘
+├──────────────┬──────────────┬──────────────┬──────────────——┤
+│  planning/   │  world/      │  perception/ │  drivers/      │
+│  指令校验     │  状态表       │  YOLO         │  机械臂         │
+│  路点规划     │  registry    │  槽位映射      │  相机           │
+│              │              │  精定位       │  夹爪           │
+└──────────────┴──────────────┴──────────────┴──────────────——┘
          config/          data/models/        utils/
 ```
 
@@ -56,13 +56,10 @@ Realman RM-65B · Orbbec 336L 腕部相机 · RS485 平行夹爪 · YOLO（`empt
 
 ## 环境要求
 
-- Python 3.10+（推荐使用 conda 环境 `surf`）
+- Python 3.10+
 - Linux，深度相机 USB 可用
-- 建议接显示器以使用 OpenCV 调试窗口（可选）
 
 ```bash
-conda activate surf
-cd ~/tube_ws
 pip install -r requirements.txt
 ```
 
@@ -126,7 +123,7 @@ python main.py move left.a1 right.b2                   # 完整抓放
 
 ---
 
-## 首次上机流程
+## 测试脚本
 
 按顺序执行，勿跳步。
 

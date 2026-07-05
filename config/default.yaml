@@ -1,5 +1,4 @@
-# tube_ws 主配置文件
-# 路径均相对于项目根目录 tube_ws/
+# 主配置文件
 
 runtime:
   continuous_mode: true        # true=单次 move/dry-run/scan 连贯执行，不等待 Enter 确认
@@ -70,13 +69,13 @@ vision:
   scan_imshow_wait_ms: 0        # 0=按键继续，>0 自动停留毫秒
   refine_imshow_wait_ms: 0
   live_preview_fps: 15          # 臂移动时相机预览帧率（无 YOLO）
-  font_scale: 0.28              # 640x480 用小字号
+  font_scale: 0.28             
 
 motion:
   approach_height_mm: 50       # 精定位前停在目标上方 5 cm
   refine_height_mm: 50         # 近距离视觉精定位高度；默认与 approach 一致
   pick_refine_height_mm: 80     # 抓取二次定位观察位：在抓取 approach 基础上上移 3cm
-  pick_transit_z_mm: 330        # 空手去抓取时的横移高度；避免 388mm 竖直姿态在右侧不可达
+  pick_transit_z_mm: 330        # 空手去抓取时的横移高度
   use_direct_pick_transit: true # 抓取从高位直接到目标正上方，避免绕行 region 偏点
   pick_descend_mm: 30         # 从抓取 approach 高位向下探 30mm 后夹取
   pick_insert_mm: 5         # 旧接口保留：抓取下降深度，主流程优先用 pick_descend_mm
@@ -86,7 +85,7 @@ motion:
   place_insert_mm: 10          # 旧接口保留：放置插入深度，主流程优先用 place_descend_mm
   place_retreat_mm: 100        # 放置后上提高度
   use_lift_pose_for_place_transit: true  # 夹着试管去放置位时经 lift_pose 安全过渡
-  place_carried_transit_z_mm: 330 # 夹持试管去放置目标正上方的法兰高位；远端槽位 388mm 竖直姿态可能不可达
+  place_carried_transit_z_mm: 330 # 夹持试管去放置目标正上方的法兰高位
   carried_clearance_z_mm: 368  # 夹持试管横移时的高位走廊 Z，防止试管碰撞
 
 tube:

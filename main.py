@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-tube_ws 主程序 CLI（Phase 9）。
+tube_ws 主程序 CLI。
 
 用法:
   python main.py                          # 交互模式
   python main.py move left.a1 right.b2    # 完整抓放
   python main.py dry-run left.a1 right.b2 # 空跑（不夹取）
-  python main.py scan                       # 仅扫描（需已交互启动或配合 --once）
+  python main.py scan                     # 连接并扫描
 """
 
 from __future__ import annotations
@@ -15,18 +15,19 @@ import argparse
 import sys
 
 from tasks.fsm_factory import build_pick_place_fsm
+from utils.cli_output import AUTO_CONT, PROMPT_START, err, ok, sub
 from utils.config_loader import load_config
 
 
 HELP_TEXT = """
 命令:
-  scan                      重新全局扫描 24 槽
-  table                     打印当前状态表
-  move SRC DST              完整抓放，如 move left.a1 right.b2
-  dry-run SRC DST           空跑（移动+精定位，不夹取）
-  quit                      退出
+  scan              重新扫描 24 槽
+  table             显示状态表
+  move SRC DST      完整抓放
+  dry-run SRC DST   空跑 (移动+定位, 不夹取)
+  quit              退出
 
-也可直接输入: left.a1 right.b2  （等同 move）
+简写: left.a1 right.b2  (等同 move)
 """
 
 
@@ -36,14 +37,14 @@ def _continuous_mode(config: dict) -> bool:
 
 def _confirm_start(config: dict) -> bool:
     if _continuous_mode(config):
-        print("连续模式已开启：跳过启动 Enter 确认")
+        print(f"{PROMPT_START}{AUTO_CONT}")
         return True
-    print("确认工作空间安全，按 Enter 开始（Ctrl+C 取消）...")
+    print(PROMPT_START)
     try:
         input()
         return True
     except KeyboardInterrupt:
-        print("\n已取消")
+        print("\n[cancelled]")
         return False
 
 
@@ -51,11 +52,18 @@ def _print_table(fsm) -> None:
     print(fsm.registry.to_table_str())
 
 
+def _report_result(ok_flag: bool, fsm) -> None:
+    if ok_flag:
+        ok()
+    else:
+        err(fsm.fail_reason)
+
+
 def _run_interactive(fsm, *, config: dict, skip_gripper: bool) -> int:
     if not _confirm_start(config):
         return 130
     if not fsm.connect_and_scan():
-        print(f"启动失败: {fsm.fail_reason}")
+        err(f"startup failed: {fsm.fail_reason}")
         return 1
 
     print(HELP_TEXT)
@@ -65,7 +73,7 @@ def _run_interactive(fsm, *, config: dict, skip_gripper: bool) -> int:
         try:
             line = input("\n> ").strip()
         except (EOFError, KeyboardInterrupt):
-            print("\n退出")
+            print("\n[exit]")
             break
 
         if not line:
@@ -81,7 +89,7 @@ def _run_interactive(fsm, *, config: dict, skip_gripper: bool) -> int:
             continue
         if cmd == "scan":
             if not fsm.scan():
-                print(f"扫描失败: {fsm.fail_reason}")
+                err(f"scan failed: {fsm.fail_reason}")
             else:
                 _print_table(fsm)
             continue
@@ -89,28 +97,27 @@ def _run_interactive(fsm, *, config: dict, skip_gripper: bool) -> int:
             _print_table(fsm)
             continue
         if cmd == "move" and len(parts) == 3:
-            ok = fsm.execute_move(f"{parts[1]} {parts[2]}", dry=False)
-            print("完成" if ok else f"失败: {fsm.fail_reason}")
-            if ok:
+            ok_flag = fsm.execute_move(f"{parts[1]} {parts[2]}", dry=False)
+            _report_result(ok_flag, fsm)
+            if ok_flag:
                 _print_table(fsm)
             continue
         if cmd in ("dry-run", "dry_run", "dryrun") and len(parts) == 3:
-            ok = fsm.execute_move(f"{parts[1]} {parts[2]}", dry=True)
-            print("完成" if ok else f"失败: {fsm.fail_reason}")
-            if ok:
+            ok_flag = fsm.execute_move(f"{parts[1]} {parts[2]}", dry=True)
+            _report_result(ok_flag, fsm)
+            if ok_flag:
                 _print_table(fsm)
             continue
 
-        # left.a1 right.b2 简写
         if len(parts) == 2 and "." in parts[0] and "." in parts[1]:
-            ok = fsm.execute_move(f"{parts[0]} {parts[1]}", dry=False)
-            print("完成" if ok else f"失败: {fsm.fail_reason}")
-            if ok:
+            ok_flag = fsm.execute_move(f"{parts[0]} {parts[1]}", dry=False)
+            _report_result(ok_flag, fsm)
+            if ok_flag:
                 _print_table(fsm)
             continue
 
-        print(f"无法识别命令: {line!r}")
-        print("输入 help 查看帮助")
+        err(f"unknown command: {line!r}")
+        sub("type 'help' for usage")
 
     fsm.shutdown()
     return 0
@@ -122,14 +129,14 @@ def main() -> int:
         "command",
         nargs="?",
         choices=("move", "dry-run", "scan"),
-        help="子命令；省略则进入交互模式",
+        help="子命令; 省略则进入交互模式",
     )
     parser.add_argument("src", nargs="?", help="源槽 left.a1")
     parser.add_argument("dst", nargs="?", help="目标槽 right.b2")
     parser.add_argument(
         "--no-gripper",
         action="store_true",
-        help="不连接夹爪（空跑调试用）",
+        help="不连接夹爪 (空跑调试用)",
     )
     args = parser.parse_args()
 
@@ -146,32 +153,32 @@ def main() -> int:
 
         if args.command == "scan":
             if not fsm.connect_and_scan():
-                print(f"扫描失败: {fsm.fail_reason}")
+                err(f"scan failed: {fsm.fail_reason}")
                 return 1
             _print_table(fsm)
             return 0
 
         if args.command == "move":
             if not args.src or not args.dst:
-                print("用法: python main.py move left.a1 right.b2")
+                err("usage: python main.py move left.a1 right.b2")
                 return 1
-            ok = fsm.run_once(f"{args.src} {args.dst}")
-            if ok:
+            ok_flag = fsm.run_once(f"{args.src} {args.dst}")
+            if ok_flag:
                 _print_table(fsm)
             else:
-                print(f"失败: {fsm.fail_reason}")
-            return 0 if ok else 1
+                err(fsm.fail_reason)
+            return 0 if ok_flag else 1
 
         if args.command == "dry-run":
             if not args.src or not args.dst:
-                print("用法: python main.py dry-run left.a1 right.b2")
+                err("usage: python main.py dry-run left.a1 right.b2")
                 return 1
-            ok = fsm.run_dry_move(f"{args.src} {args.dst}")
-            if ok:
+            ok_flag = fsm.run_dry_move(f"{args.src} {args.dst}")
+            if ok_flag:
                 _print_table(fsm)
             else:
-                print(f"失败: {fsm.fail_reason}")
-            return 0 if ok else 1
+                err(fsm.fail_reason)
+            return 0 if ok_flag else 1
 
         return 1
     finally:

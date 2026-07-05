@@ -44,10 +44,11 @@ desktop.ini
 *.log
 *.tmp
 *.bak
+Log/
 
 # ── 本地数据（运行时生成或体积大，不入库）──
 
-
+data/captures/
 
 # 离线标注、调查图等
 survey_*.jpg
