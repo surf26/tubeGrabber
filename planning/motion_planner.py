@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -91,6 +92,14 @@ class MotionPlanner:
         self._default_speed = int(self._arm.get("default_speed", 20))
         self._approach_speed = int(self._arm.get("approach_speed", 10))
         self._tcp_offset_mm = load_tcp_offset_mm(config=config)
+
+        # 夹爪偏航自适应对齐参数
+        gripper_cfg = config.get("gripper", {})
+        self._yaw_offset_rad = float(gripper_cfg.get("yaw_offset_rad", 0.0))
+        self._finger_default_axis = str(gripper_cfg.get("finger_default_axis", "row"))
+        self._max_grasp_yaw_dev_rad = float(
+            self._safety.get("max_grasp_yaw_dev_rad", 1.7)
+        )
 
         self._scan_pose = _as_pose6(poses["scan"])
         self._left_region = _as_pose6(poses["left_region"])
@@ -326,18 +335,25 @@ class MotionPlanner:
     def build_place_approach_pose(
         self,
         base_xyz: tuple[float, float, float],
+        *,
+        yaw_rad: float | None = None,
     ) -> tuple[float, float, float, float, float, float]:
         """放置位姿：按夹持试管底端留安全高度，而不是只按夹爪 TCP。"""
-        return self.build_approach_pose(base_xyz, self._place_approach_height_mm)
+        return self.build_approach_pose(
+            base_xyz, self._place_approach_height_mm, yaw_rad=yaw_rad
+        )
 
     def build_approach_pose(
         self,
         base_xyz: tuple[float, float, float],
         approach_height_mm: float | None = None,
+        *,
+        yaw_rad: float | None = None,
     ) -> tuple[float, float, float, float, float, float]:
         """
         base_xyz：视觉给出的抓取点（夹爪 TCP 目标，基坐标 mm）。
         返回法兰应到的 6D 位姿，使 TCP 停在目标上方 approach_height_mm。
+        yaw_rad 非空时覆盖腕部偏航 rz（绕竖直工具 Z，不影响竖直性）。
         """
         height = (
             self._approach_height_mm
@@ -346,10 +362,43 @@ class MotionPlanner:
         )
         x, y, z = (float(base_xyz[0]), float(base_xyz[1]), float(base_xyz[2]))
         rx, ry, rz = self._vertical_pose[3:6]
+        if yaw_rad is not None:
+            rz = float(yaw_rad)
         self._assert_vertical_tool((rx, ry, rz))
         tip_xyz = (x, y, z + height)
         flange_xyz = tip_xyz_to_flange_xyz(tip_xyz, (rx, ry, rz), self._tcp_offset_mm)
         return (*flange_xyz, rx, ry, rz)
+
+    def choose_grasp_yaw(self, slot_id: str, registry: Any) -> float | None:
+        """
+        依据架面 θ 与相邻 tube 的方向，选夹爪偏航 rz（避免手指压到相邻试管）。
+
+        - 左右有邻管 → 手指沿竖直轴 φ_v = θ+90°；
+        - 上下有邻管 → 手指沿水平轴 φ_h = θ；
+        - 无邻管 → 按 finger_default_axis 默认；
+        夹爪 180° 对称，取与中性 rz 就近的等价角；超出 max_grasp_yaw_dev 返回 None。
+        θ 未知返回 None（由上层回退到默认竖直姿态）。
+        """
+        side = slot_id.split(".", 1)[0]
+        theta = registry.rack_theta.get(side)
+        if theta is None:
+            return None
+
+        h, v = registry.neighbor_tube_axes(slot_id)
+        phi_h = float(theta)
+        phi_v = float(theta) + np.pi / 2.0
+        if h:
+            psi = phi_v
+        elif v:
+            psi = phi_h
+        else:
+            psi = phi_v if self._finger_default_axis == "col" else phi_h
+
+        neutral_rz = float(self._vertical_pose[5])
+        rz = _nearest_equiv_angle(psi - self._yaw_offset_rad, neutral_rz, np.pi)
+        if abs(_wrap_pi(rz - neutral_rz)) > self._max_grasp_yaw_dev_rad:
+            return None
+        return rz
 
     def build_retreat_pose(
         self,
@@ -494,6 +543,17 @@ class MotionPlanner:
         rx, ry, rz = self._vertical_pose[3:6]
         delta_z = float((rotation_matrix_rpy(rx, ry, rz) @ self._carried_tip_offset_mm())[2])
         return required_bottom_z - delta_z
+
+
+def _wrap_pi(angle: float) -> float:
+    """把角度归一到 (-π, π]。"""
+    return (float(angle) + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def _nearest_equiv_angle(angle: float, ref: float, period: float) -> float:
+    """在 angle + k*period（k∈Z）中取最接近 ref 的等价角。"""
+    k = round((float(ref) - float(angle)) / float(period))
+    return float(angle) + k * float(period)
 
 
 def _load_pose_list(path: str) -> list[float]:

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import time
+import traceback
 from enum import Enum
 from typing import Any
 
@@ -29,7 +31,13 @@ from utils.cli_output import (
 from utils.config_loader import load_yaml
 from utils.vision_viz import VisionDisplay, draw_refine_annotation, draw_scan_annotation
 from world.operation_verifier import OperationVerifier
-from world.tube_registry import TubeRegistry, estimate_z_rack
+from world.tube_registry import TubeRegistry, measure_rack_z
+
+
+def _angle_close(a: float, b: float, tol: float) -> bool:
+    """角度就近比较，处理 ±π 环绕（竖直姿态 rx≈π 时 SDK 可能返回 ±π）。"""
+    d = (a - b + math.pi) % (2 * math.pi) - math.pi
+    return abs(d) <= tol
 
 
 class FSMError(RuntimeError):
@@ -246,6 +254,7 @@ class PickPlaceFSM:
         try:
             return handler()
         except Exception as exc:
+            traceback.print_exc()
             self._fail(str(exc))
             return False
 
@@ -306,6 +315,8 @@ class PickPlaceFSM:
         T_base_ee = pose_6d_to_matrix(pose_6d)
 
         detections = self._detector.detect(frame.color)
+        working_z = self._registry.z_rack
+        tube_above = float(self._rack_layout.get("tube_above_rack_mm", 30))
         observations = self._mapper.map(
             detections,
             frame.depth,
@@ -315,13 +326,18 @@ class PickPlaceFSM:
             T_base_ee=T_base_ee,
             depth_min_mm=self._cam_cfg.get("depth_min_mm", 100),
             depth_max_mm=self._cam_cfg.get("depth_max_mm", 800),
+            z_rack_override=working_z,
         )
-        z_rack = estimate_z_rack(
-            observations,
-            tube_above_rack_mm=float(self._rack_layout.get("tube_above_rack_mm", 30)),
-            default_z_mm=self._rack_layout.get("default_rack_plane_z_mm"),
-        )
+        measured_z, n_tubes = measure_rack_z(observations, tube_above_rack_mm=tube_above)
+        z_rack = self._resolve_scan_z_rack(working_z, measured_z, n_tubes)
+        if z_rack is None:
+            self._fail(
+                "SCAN_GLOBAL: 无法确定 z_rack（当前 tube 太少且无标定兜底），"
+                "请在架上多放几支试管后重新扫描"
+            )
+            return False
         self._registry.update_from_scan(observations, z_rack)
+        self._registry.set_rack_theta(self._mapper.last_rack_theta)
         tube_count = len(self._registry.find_tube_slots())
         sub(f"z_rack={z_rack:.1f} mm, tube_count={tube_count}")
 
@@ -336,6 +352,33 @@ class PickPlaceFSM:
         )
         self._viz.show_scan(annotated)
         return True
+
+    def _resolve_scan_z_rack(
+        self,
+        working_z: float | None,
+        measured_z: float | None,
+        n_tubes: int,
+    ) -> float | None:
+        """
+        选定本次扫描使用的 z_rack：
+        - 首帧(working_z=None)：管足够则用本帧测量，否则用标定兜底；
+        - 后续：复用已标定 working_z，仅当"管足够且偏差大"时告警提示重标。
+        """
+        min_tubes = int(self._registry_cfg.get("min_tubes_for_z_calib", 3))
+        drift = float(self._registry_cfg.get("z_rack_drift_warn_mm", 5))
+        default_z = self._rack_layout.get("default_rack_plane_z_mm")
+        default_z = float(default_z) if default_z is not None else None
+        if working_z is None:
+            if measured_z is not None and n_tubes >= min_tubes:
+                return measured_z
+            return default_z
+        if (
+            measured_z is not None
+            and n_tubes >= min_tubes
+            and abs(measured_z - working_z) > drift
+        ):
+            print("[SCAN_GLOBAL][WARN] 架面高度疑似变化,建议重标")
+        return working_z
 
     def _do_validate_cmd(self) -> bool:
         if self._cmd is None:
@@ -442,7 +485,10 @@ class PickPlaceFSM:
             font_scale=self._font_scale,
         )
         self._viz.show_refine(refine_vis)
-        approach = self._planner.build_approach_pose(refined_base)
+        yaw = self._planner.choose_grasp_yaw(self._cmd.src, self._registry)
+        if yaw is not None:
+            sub(f"grasp yaw aligned: rz={yaw:.3f} rad")
+        approach = self._planner.build_approach_pose(refined_base, yaw_rad=yaw)
         sub(f"descend to pick_approach, speed={self._arm_cfg['approach_speed']}")
         self._move_pose(approach, self._arm_cfg["approach_speed"], label="pick_approach")
         self._pick_approach = approach
@@ -590,7 +636,10 @@ class PickPlaceFSM:
             font_scale=self._font_scale,
         )
         self._viz.show_refine(refine_vis)
-        approach = self._planner.build_place_approach_pose(refined_base)
+        yaw = self._planner.choose_grasp_yaw(self._cmd.dst, self._registry)
+        if yaw is not None:
+            sub(f"place yaw aligned: rz={yaw:.3f} rad")
+        approach = self._planner.build_place_approach_pose(refined_base, yaw_rad=yaw)
         from_pose = self._last_pose or self._arm.get_pose_6d()
         above_refined = (
             approach[0],
@@ -735,7 +784,7 @@ class PickPlaceFSM:
             delta_mm=delta_mm,
             speed=speed,
         )
-        if self._near_pose(pose):
+        if self._pose_close(cur, pose, tol_mm=1.0, tol_rad=0.02):
             sub(f"move_p [{label}] already at target, skipped")
             return
 
@@ -744,10 +793,10 @@ class PickPlaceFSM:
             self._arm.move_p(pose, speed=speed, block=True)
             deadline = time.monotonic() + 120.0
             while time.monotonic() < deadline:
-                if self._near_pose(pose, tol_mm=2.0, tol_rad=0.08):
-                    after = self._arm.get_pose_6d()
-                    moved = max(abs(after[i] - cur[i]) for i in range(3))
-                    move_done(label, after[:3], moved)
+                now_pose = self._arm.get_pose_6d()
+                if self._pose_close(now_pose, pose, tol_mm=2.0, tol_rad=0.08):
+                    moved = max(abs(now_pose[i] - cur[i]) for i in range(3))
+                    move_done(label, now_pose[:3], moved)
                     return
                 time.sleep(0.1)
             after = self._arm.get_pose_6d()
@@ -759,6 +808,23 @@ class PickPlaceFSM:
         finally:
             self._viz.stop_live()
 
+    @staticmethod
+    def _pose_close(
+        cur: tuple[float, float, float, float, float, float],
+        target: tuple[float, float, float, float, float, float],
+        *,
+        tol_mm: float,
+        tol_rad: float,
+    ) -> bool:
+        """位置按 mm abs 比较，姿态角用 _angle_close 处理 ±π 环绕。"""
+        for i in range(3):
+            if abs(cur[i] - target[i]) > tol_mm:
+                return False
+        for i in range(3, 6):
+            if not _angle_close(cur[i], target[i], tol_rad):
+                return False
+        return True
+
     def _near_pose(
         self,
         target: tuple[float, float, float, float, float, float],
@@ -767,13 +833,7 @@ class PickPlaceFSM:
         tol_rad: float = 0.02,
     ) -> bool:
         cur = self._arm.get_pose_6d()
-        for i in range(3):
-            if abs(cur[i] - target[i]) > tol_mm:
-                return False
-        for i in range(3, 6):
-            if abs(cur[i] - target[i]) > tol_rad:
-                return False
-        return True
+        return self._pose_close(cur, target, tol_mm=tol_mm, tol_rad=tol_rad)
 
     def _refine_match_params(self) -> tuple[float, float]:
         """精定位 XY 匹配半径与歧义最小差距（mm），来自 config registry。"""

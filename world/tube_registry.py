@@ -50,6 +50,26 @@ def estimate_z_rack(
     raise TubeRegistryError("无法估计 z_rack，请提供 depth 图或 --z-rack")
 
 
+def measure_rack_z(
+    observations: dict[str, SlotObservation],
+    *,
+    tube_above_rack_mm: float = 30.0,
+) -> tuple[float | None, int]:
+    """
+    从当前扫描直接测量 rack 平面高度（纯函数，不做兜底）。
+    返回 (median(tube base_z) - tube_above_rack_mm, 参与统计的管数)；
+    无有效 tube 深度时返回 (None, 0)。
+    """
+    tube_zs = [
+        o.base_xyz[2]
+        for o in observations.values()
+        if o.klass == "tube" and o.base_xyz is not None
+    ]
+    if not tube_zs:
+        return None, 0
+    return float(np.median(tube_zs)) - float(tube_above_rack_mm), len(tube_zs)
+
+
 def _resolve_base_xyz(
     obs: SlotObservation,
     z_rack: float,
@@ -76,10 +96,43 @@ class TubeRegistry:
             slot_id: SlotState(slot_id=slot_id) for slot_id in self._slot_order
         }
         self._z_rack: float | None = None
+        self._rack_theta: dict[str, float] = {}
 
     @property
     def z_rack(self) -> float | None:
         return self._z_rack
+
+    @property
+    def rack_theta(self) -> dict[str, float]:
+        """各侧试管架在架面内的旋转角 θ（rad），由 SlotMapper 网格拟合得到。"""
+        return dict(self._rack_theta)
+
+    def set_rack_theta(self, mapping: dict[str, float]) -> None:
+        """更新各侧 θ（拷贝，避免外部可变引用）。"""
+        self._rack_theta = {str(k): float(v) for k, v in (mapping or {}).items()}
+
+    def neighbor_tube_axes(self, slot_id: str) -> tuple[bool, bool]:
+        """
+        返回 (左右方向有 tube, 上下方向有 tube)。
+        左右=同行相邻列(col±1)；上下=同列相邻行(相邻字母)。
+        """
+        side, _, rc = slot_id.partition(".")
+        if not rc:
+            return False, False
+        row = rc[0]
+        try:
+            col_num = int(rc[1:])
+        except ValueError:
+            return False, False
+        row_ord = ord(row)
+
+        def _is_tube(sid: str) -> bool:
+            st = self._slots.get(sid)
+            return st is not None and st.klass == "tube"
+
+        horiz = any(_is_tube(f"{side}.{row}{col_num + dc}") for dc in (-1, 1))
+        vert = any(_is_tube(f"{side}.{chr(row_ord + dr)}{col_num}") for dr in (-1, 1))
+        return horiz, vert
 
     def slot_ids(self) -> list[str]:
         return list(self._slot_order)

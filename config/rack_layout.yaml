@@ -16,3 +16,8 @@ right_row_order: ["d", "c", "b", "a"]
 # 空槽 Z 估算（utils/rack_height.py 使用）
 tube_above_rack_mm: 22        # 试管盖/顶部高出试管架平台 2.2cm
 default_rack_plane_z_mm: null  # 无法从视觉估计时的兜底 Z，null 表示必须靠扫描
+
+# 度量栅格指派步距（架面 mm）；null 表示由 SlotMapper 在线估计，现场实测后可填死
+slot_pitch_mm:
+  col: null
+  row: null

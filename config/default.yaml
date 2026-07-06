@@ -35,6 +35,8 @@ gripper:
   run_speed: 51200           # 寄存器 40：运行速度
   # 法兰 → 夹爪 TCP（指尖/抓取中心），末端坐标系下平移 mm；视觉 base_xyz 为 TCP 目标点
   tcp_offset_mm: [0, 0, 220]   # 法兰→夹爪 TCP（ee 系）；当前竖直姿态下应生成正的法兰 Z
+  yaw_offset_rad: 0.0          # 夹爪手指张合轴相对腕部 rz 的安装偏置；上机标定后填写
+  finger_default_axis: "row"   # 无相邻管时默认对齐轴：row=沿行(φ_h)，col=沿列(φ_v)
   reg_zero_speed: 36
   reg_init_speed: 38
   reg_run_speed: 40
@@ -101,6 +103,7 @@ safety:
   min_place_approach_flange_z: 220
   min_place_insert_flange_z: 150
   max_tool_tilt_deg: 1        # 抓取/放置时工具 Z 轴相对竖直向下的最大倾角
+  max_grasp_yaw_dev_rad: 1.7  # 夹爪偏航相对中性 rz 的最大偏移；超出则放弃对齐用默认姿态
 
 poses:
   scan_pose: "config/poses/scan_pose.json"
@@ -124,6 +127,8 @@ rack:
 registry:
   slot_match_max_dist_mm: 15        # 精定位候选与预期槽 base_xy 最大平面偏差 (mm)
   refine_ambiguity_min_delta_mm: 2  # 最近/次近候选 dist_xy 最小差距，低于此报歧义；现场可试 5
+  min_tubes_for_z_calib: 3          # 用当前扫描测量 z_rack 所需最少管数
+  z_rack_drift_warn_mm: 5           # 复用 z_rack 时，与本帧测量偏差超过此值告警（疑似架面变动）
 
 verification:
   pick:
