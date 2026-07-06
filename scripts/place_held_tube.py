@@ -15,12 +15,11 @@ from drivers.arm_driver import ArmDriver
 from drivers.camera_driver import CameraDriver
 from drivers.gripper_driver import GripperDriver
 from perception.coord_transform import load_T_ee_cam, load_intrinsics, pose_6d_to_matrix
-from perception.slot_mapper import SlotMapper
-from perception.yolo_detector import YoloDetector
 from planning.motion_planner import Waypoint, MotionPlanner, format_waypoints
 from utils.config_loader import load_config, load_yaml
+from utils.perception_factory import build_detector, build_registry, build_slot_mapper
 from utils.vision_viz import VisionDisplay, draw_scan_annotation
-from world.tube_registry import TubeRegistry, estimate_z_rack
+from world.tube_registry import estimate_z_rack
 
 
 def main() -> int:
@@ -51,7 +50,6 @@ def main() -> int:
         print("[CHECK_HW] 连接机械臂/相机/夹爪...")
         arm.connect()
         camera.connect()
-        viz.bind_camera(camera)
         gripper = GripperDriver(arm, cfg["gripper"])
         gripper.setup_modbus(skip_initial_close=True)
         print("[CHECK_HW] OK")
@@ -62,7 +60,7 @@ def main() -> int:
 
         print("[SCAN] 回观察位并识别目标孔...")
         current = arm.get_pose_6d()
-        _execute_waypoints(arm, planner.plan_to_scan(current), cfg, viz, "scan")
+        _execute_waypoints(arm, planner.plan_to_scan(current), cfg, "scan")
         arm.wait_motion_done()
         time.sleep(0.2)
         frame = camera.capture()
@@ -120,7 +118,7 @@ def main() -> int:
             return 1
         print(format_waypoints(waypoints))
         print("[MOVE] 到目标槽 place/refine 高位...")
-        _execute_waypoints(arm, waypoints, cfg, viz, "place_transit")
+        _execute_waypoints(arm, waypoints, cfg, "place_transit")
 
         print(
             f"[CONFIRM] 将下探放置，松开到 {args.release}，上提 {args.retreat_mm:.1f}mm。"
@@ -142,16 +140,16 @@ def main() -> int:
                 f"{args.min_insert_flange_z:.1f}mm，拒绝下探"
             )
             return 1
-        _move_pose(arm, insert, cfg["arm"]["approach_speed"], "place_insert", viz)
+        _move_pose(arm, insert, cfg["arm"]["approach_speed"], "place_insert")
 
         print(f"[GRIPPER] release -> {args.release}")
         gripper.move_to(args.release)
 
         retreat = planner.build_retreat_pose(insert, args.retreat_mm)
-        _move_pose(arm, retreat, cfg["arm"]["default_speed"], "place_retreat", viz)
+        _move_pose(arm, retreat, cfg["arm"]["default_speed"], "place_retreat")
 
         print("[RETURN] 回 scan 观察位...")
-        _execute_waypoints(arm, planner.plan_to_scan(retreat), cfg, viz, "return_scan")
+        _execute_waypoints(arm, planner.plan_to_scan(retreat), cfg, "return_scan")
         arm.wait_motion_done()
         frame = camera.capture()
         out = Path("data/captures/latest_place_held_return.png")
@@ -177,17 +175,9 @@ def main() -> int:
 
 
 def _build_modules(cfg):
-    class_map = {int(k): v for k, v in cfg["yolo"]["classes"].items()}
-    detector = YoloDetector(
-        cfg["yolo"]["model_path"],
-        cfg["yolo"]["conf_threshold"],
-        cfg["yolo"]["iou_threshold"],
-        class_map,
-    )
-    detector.load()
-    rack = load_yaml(cfg["calib"]["rack_layout"])
-    mapper = SlotMapper(rack_config=rack, image_width=cfg["camera"]["width"])
-    registry = TubeRegistry(mapper.all_slot_ids())
+    detector = build_detector(cfg)
+    mapper = build_slot_mapper(cfg)
+    registry = build_registry(mapper)
     planner = MotionPlanner.from_config(cfg)
     return detector, mapper, registry, planner
 
@@ -196,7 +186,6 @@ def _execute_waypoints(
     arm: ArmDriver,
     waypoints: list[Waypoint],
     cfg: dict,
-    viz: VisionDisplay,
     phase: str,
 ) -> None:
     for wp in waypoints:
@@ -205,7 +194,6 @@ def _execute_waypoints(
             wp.pose_6d,
             wp.speed or cfg["arm"]["default_speed"],
             f"{phase}/{wp.label}",
-            viz,
         )
 
 
@@ -214,7 +202,6 @@ def _move_pose(
     pose: tuple[float, float, float, float, float, float],
     speed: int,
     label: str,
-    viz: VisionDisplay,
 ) -> None:
     cur = arm.get_pose_6d()
     print(
@@ -222,11 +209,7 @@ def _move_pose(
         f"rpy=({pose[3]:.3f},{pose[4]:.3f},{pose[5]:.3f}) | "
         f"当前xyz=({cur[0]:.1f},{cur[1]:.1f},{cur[2]:.1f})"
     )
-    viz.start_live()
-    try:
-        arm.move_p(pose, speed=speed, block=True)
-    finally:
-        viz.stop_live()
+    arm.move_p(pose, speed=speed, block=True)
 
 
 if __name__ == "__main__":

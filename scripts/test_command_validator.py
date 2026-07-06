@@ -16,17 +16,16 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from perception.slot_mapper import SlotMapper
 from planning.command_validator import CommandValidator, CommandValidatorError
-from utils.config_loader import load_config, load_yaml
+from utils.config_loader import load_config
+from utils.perception_factory import build_registry, build_slot_mapper
 from world.tube_registry import TubeRegistry
 
 
 def _build_demo_registry() -> TubeRegistry:
     cfg = load_config()
-    rack = load_yaml(cfg["calib"]["rack_layout"])
-    mapper = SlotMapper(rack_config=rack)
-    registry = TubeRegistry(mapper.all_slot_ids())
+    mapper = build_slot_mapper(cfg)
+    registry = build_registry(mapper)
 
     registry.update_slot(
         "left.a1",

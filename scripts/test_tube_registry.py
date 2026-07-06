@@ -20,10 +20,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from perception.coord_transform import load_T_ee_cam, load_intrinsics, pose_6d_to_matrix
-from perception.slot_mapper import SlotMapper
-from perception.yolo_detector import YoloDetector
 from utils.config_loader import load_config, load_yaml
-from world.tube_registry import TubeRegistry, TubeRegistryError, estimate_z_rack
+from utils.perception_factory import build_detector, build_registry, build_slot_mapper
+from utils.pose_io import load_pose_list
+from world.tube_registry import TubeRegistryError, estimate_z_rack
 
 
 def main() -> int:
@@ -64,25 +64,14 @@ def main() -> int:
             return 1
 
     cfg = load_config()
-    yolo_cfg = cfg["yolo"]
     cam_cfg = cfg["camera"]
     rack_layout = load_yaml(cfg["calib"]["rack_layout"])
 
-    class_map = {int(k): v for k, v in yolo_cfg["classes"].items()}
-    detector = YoloDetector(
-        model_path=yolo_cfg["model_path"],
-        conf_threshold=yolo_cfg["conf_threshold"],
-        iou_threshold=yolo_cfg["iou_threshold"],
-        class_id_to_name=class_map,
-    )
-    detector.load()
+    detector = build_detector(cfg)
     detections = detector.detect(color)
     print(f"YOLO 检测数: {len(detections)}")
 
-    mapper = SlotMapper(
-        rack_config=rack_layout,
-        image_width=cam_cfg["width"],
-    )
+    mapper = build_slot_mapper(cfg)
 
     K = dist = T_ee_cam = T_base_ee = None
     if depth is not None:
@@ -91,15 +80,7 @@ def main() -> int:
         if args.pose:
             pose_6d = list(args.pose)
         else:
-            scan = load_yaml(cfg["poses"]["scan_pose"])["pose"]
-            pose_6d = [
-                scan["x"],
-                scan["y"],
-                scan["z"],
-                scan["rx"],
-                scan["ry"],
-                scan["rz"],
-            ]
+            pose_6d = load_pose_list(cfg["poses"]["scan_pose"])
             print("使用 scan_pose.json 作为臂姿（离线近似）")
         T_base_ee = pose_6d_to_matrix(pose_6d)
 
@@ -130,7 +111,7 @@ def main() -> int:
             print("提示: 无 depth 时可加 --z-rack 120.0 做离线测试")
             return 1
 
-    registry = TubeRegistry(mapper.all_slot_ids())
+    registry = build_registry(mapper)
     registry.update_from_scan(observations, z_rack)
 
     print()

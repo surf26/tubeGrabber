@@ -13,7 +13,8 @@ from perception.coord_transform import (
     rotation_matrix_rpy,
     tip_xyz_to_flange_xyz,
 )
-from utils.config_loader import load_config, load_yaml
+from utils.config_loader import load_config
+from utils.pose_io import load_pose_list
 from world.tube_registry import SlotState
 
 
@@ -105,11 +106,11 @@ class MotionPlanner:
         cfg = config or load_config()
         pose_cfg = cfg["poses"]
         poses = {
-            "scan": _load_pose_list(pose_cfg["scan_pose"]),
-            "left_region": _load_pose_list(pose_cfg["left_region_pose"]),
-            "right_region": _load_pose_list(pose_cfg["right_region_pose"]),
-            "lift": _load_pose_list(pose_cfg.get("lift_pose", pose_cfg["scan_pose"])),
-            "vertical": _load_pose_list(pose_cfg["vertical_ee_pose"]),
+            "scan": load_pose_list(pose_cfg["scan_pose"]),
+            "left_region": load_pose_list(pose_cfg["left_region_pose"]),
+            "right_region": load_pose_list(pose_cfg["right_region_pose"]),
+            "lift": load_pose_list(pose_cfg.get("lift_pose", pose_cfg["scan_pose"])),
+            "vertical": load_pose_list(pose_cfg["vertical_ee_pose"]),
         }
         return cls(cfg, poses)
 
@@ -446,14 +447,6 @@ class MotionPlanner:
         flange_xyz = tip_xyz_to_flange_xyz(tip, (rx, ry, rz), self._tcp_offset_mm)
         return (*flange_xyz, rx, ry, rz)
 
-    def _raise_pose(
-        self,
-        pose: tuple[float, float, float, float, float, float],
-        offset_mm: float,
-    ) -> tuple[float, float, float, float, float, float]:
-        x, y, z, rx, ry, rz = pose
-        return (x, y, z + float(offset_mm), rx, ry, rz)
-
     def _transit_pose(
         self,
         from_pose: tuple[float, float, float, float, float, float],
@@ -494,19 +487,6 @@ class MotionPlanner:
         rx, ry, rz = self._vertical_pose[3:6]
         delta_z = float((rotation_matrix_rpy(rx, ry, rz) @ self._carried_tip_offset_mm())[2])
         return required_bottom_z - delta_z
-
-
-def _load_pose_list(path: str) -> list[float]:
-    data = load_yaml(path)
-    pose = data["pose"]
-    return [
-        float(pose["x"]),
-        float(pose["y"]),
-        float(pose["z"]),
-        float(pose["rx"]),
-        float(pose["ry"]),
-        float(pose["rz"]),
-    ]
 
 
 def _as_pose6(values: list[float]) -> tuple[float, float, float, float, float, float]:

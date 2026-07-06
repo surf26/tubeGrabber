@@ -1,4 +1,4 @@
-# tube_ws
+# tubeGrabber
 
 **24 孔试管架视觉引导抓放系统**
 
@@ -8,7 +8,7 @@ Realman RM-65B · Orbbec 336L 腕部相机 · RS485 平行夹爪 · YOLO（`empt
 
 ## 概述
 
-`tube_ws` 是一套分层式机器人软件栈，用于在两个 12 孔试管架（共 24 槽）之间自动搬运试管。槽位 ID（如 `left.a1`、`right.b2`）为逻辑编号、长期稳定；**物理坐标在每次全局扫描时由 RGB-D 视觉、手眼标定与当前臂姿重新解算**，不写入配置文件。
+`tubeGrabber` 是一套分层式机器人软件栈，用于在两个 12 孔试管架（共 24 槽）之间自动搬运试管。槽位 ID（如 `left.a1`、`right.b2`）为逻辑编号、长期稳定；**物理坐标在每次全局扫描时由 RGB-D 视觉、手眼标定与当前臂姿重新解算**，不写入配置文件。
 
 **设计要点**
 
@@ -64,6 +64,8 @@ pip install -r requirements.txt
 ```
 
 主要依赖：`numpy`、`opencv-python`、`pyyaml`、`ultralytics`、`pyorbbecsdk2`、`Robotic_Arm`。
+
+从零部署、现场验收和排错流程见：[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)。
 
 ---
 
@@ -137,7 +139,7 @@ python main.py move left.a1 right.b2                   # 完整抓放
 | 6 | `python main.py dry-run … --no-gripper` | 路径与精定位验证 |
 | 7 | `python main.py move …` | 端到端搬运 |
 
-完整检查项、安全须知与调参说明：**[`docs/ON_SITE_DEBUG_GUIDE.md`](docs/ON_SITE_DEBUG_GUIDE.md)**
+完整部署、检查项、安全须知与调参说明：**[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)**
 
 ---
 
@@ -158,13 +160,16 @@ python main.py move left.a1 right.b2                   # 完整抓放
 
 由 `config/default.yaml` → `vision` 控制：
 
-| 窗口 | 触发时机 |
-|------|----------|
-| `scan_view` | 每次全局扫描后 — YOLO 框、24 槽编号、图例 |
-| `refine_view` | pick / place 精定位后 |
-| `camera_live` | 臂运动过程中（纯相机画面，**无 YOLO 追踪**） |
+程序只使用一个窗口：`tubeGrabber Dashboard`。
 
-scan / refine 窗口按 **Enter** 或 **Space** 继续。无图形界面时设 `vision.display_enabled: false`。
+| 区域 | 内容 |
+|------|------|
+| 左列 | 最近几次全局 YOLO 扫描结果 |
+| 中上 | 最新 pick / place 精定位结果 |
+| 中下 | 运动过程实时相机画面 |
+| 右列 | 24 槽试管状态表、置信度、坐标与 Z 来源 |
+
+dashboard 不等待按键确认，会随流程自动刷新。无图形界面时设 `vision.display_enabled: false`；如需保存最新标注图，设 `vision.save_latest_views: true`。
 
 ---
 
@@ -189,7 +194,7 @@ python scripts/test_tube_registry.py color.png --depth depth.png
 ## 项目结构
 
 ```text
-tube_ws/
+tubeGrabber/
 ├── main.py                 # CLI 入口
 ├── config/                 # 运行配置、示教位姿、标定文件
 ├── drivers/                # 机械臂、相机、夹爪驱动
@@ -202,5 +207,3 @@ tube_ws/
 ├── data/models/            # YOLO 权重
 └── docs/                   # 开发与上机文档
 ```
-
-

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import yaml
 
-# tube_ws 项目根目录（本文件在 utils/ 下）
+# tubeGrabber 项目根目录（本文件在 utils/ 下）
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 

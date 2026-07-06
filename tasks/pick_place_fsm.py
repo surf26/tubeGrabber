@@ -262,6 +262,7 @@ class PickPlaceFSM:
             self._arm.connect()
         self._camera.connect()
         self._viz.bind_camera(self._camera)
+        self._viz.set_status("hardware connected")
         if not self._skip_gripper:
             try:
                 if self._gripper is None:
@@ -299,7 +300,6 @@ class PickPlaceFSM:
 
         self._arm.wait_motion_done()
         time.sleep(0.2)
-        self._viz.stop_live()
         frame = self._camera.capture()
         pose_6d = self._arm.get_pose_6d()
         self._last_pose = pose_6d
@@ -334,7 +334,11 @@ class PickPlaceFSM:
             z_rack=z_rack,
             font_scale=self._font_scale,
         )
-        self._viz.show_scan(annotated)
+        self._viz.show_scan(
+            annotated,
+            registry=self._registry,
+            status=f"SCAN_GLOBAL: tube={tube_count}, z_rack={z_rack:.1f}mm",
+        )
         return True
 
     def _do_validate_cmd(self) -> bool:
@@ -365,7 +369,6 @@ class PickPlaceFSM:
         stage("PICK_REFINE", f"refine slot {self._cmd.src}")
         self._arm.wait_motion_done()
         time.sleep(0.2)
-        self._viz.stop_live()
         frame = self._camera.capture()
 
         src = self._registry.get(self._cmd.src)
@@ -441,7 +444,11 @@ class PickPlaceFSM:
             title="PICK_REFINE" if result else "PICK_REFINE_IMAGE_ONLY",
             font_scale=self._font_scale,
         )
-        self._viz.show_refine(refine_vis)
+        self._viz.show_refine(
+            refine_vis,
+            registry=self._registry,
+            status=f"PICK_REFINE: {self._cmd.src}",
+        )
         approach = self._planner.build_approach_pose(refined_base)
         sub(f"descend to pick_approach, speed={self._arm_cfg['approach_speed']}")
         self._move_pose(approach, self._arm_cfg["approach_speed"], label="pick_approach")
@@ -484,6 +491,7 @@ class PickPlaceFSM:
         self._registry.update_slot(
             self._cmd.src, klass="unknown", z_source="pending_verify"
         )
+        self._viz.update_registry(self._registry)
         self._last_pose = retreat
         return True
 
@@ -525,7 +533,6 @@ class PickPlaceFSM:
         stage("PLACE_REFINE", f"refine slot {self._cmd.dst}")
         self._arm.wait_motion_done()
         time.sleep(0.2)
-        self._viz.stop_live()
         frame = self._camera.capture()
 
         dst = self._registry.get(self._cmd.dst)
@@ -589,7 +596,11 @@ class PickPlaceFSM:
             title="PLACE_REFINE" if result else "PLACE_REFINE_DETECT_ONLY",
             font_scale=self._font_scale,
         )
-        self._viz.show_refine(refine_vis)
+        self._viz.show_refine(
+            refine_vis,
+            registry=self._registry,
+            status=f"PLACE_REFINE: {self._cmd.dst}",
+        )
         approach = self._planner.build_place_approach_pose(refined_base)
         from_pose = self._last_pose or self._arm.get_pose_6d()
         above_refined = (
@@ -665,6 +676,7 @@ class PickPlaceFSM:
         self._registry.update_slot(
             self._cmd.dst, klass="unknown", z_source="pending_verify"
         )
+        self._viz.update_registry(self._registry)
         self._last_pose = retreat
         return True
 
@@ -739,25 +751,24 @@ class PickPlaceFSM:
             sub(f"move_p [{label}] already at target, skipped")
             return
 
-        self._viz.start_live()
-        try:
-            self._arm.move_p(pose, speed=speed, block=True)
-            deadline = time.monotonic() + 120.0
-            while time.monotonic() < deadline:
-                if self._near_pose(pose, tol_mm=2.0, tol_rad=0.08):
-                    after = self._arm.get_pose_6d()
-                    moved = max(abs(after[i] - cur[i]) for i in range(3))
-                    move_done(label, after[:3], moved)
-                    return
-                time.sleep(0.1)
-            after = self._arm.get_pose_6d()
-            raise FSMError(
-                f"move_p [{label}] timeout: "
-                f"target=({pose[0]:.1f},{pose[1]:.1f},{pose[2]:.1f}) "
-                f"current=({after[0]:.1f},{after[1]:.1f},{after[2]:.1f})"
-            )
-        finally:
-            self._viz.stop_live()
+        self._viz.set_status(f"moving: {label}")
+        self._arm.move_p(pose, speed=speed, block=False)
+        deadline = time.monotonic() + 120.0
+        while time.monotonic() < deadline:
+            self._viz.tick_live(status=f"moving: {label}")
+            if self._near_pose(pose, tol_mm=2.0, tol_rad=0.08):
+                after = self._arm.get_pose_6d()
+                moved = max(abs(after[i] - cur[i]) for i in range(3))
+                move_done(label, after[:3], moved)
+                self._viz.tick_live(status=f"reached: {label}")
+                return
+            time.sleep(0.1)
+        after = self._arm.get_pose_6d()
+        raise FSMError(
+            f"move_p [{label}] timeout: "
+            f"target=({pose[0]:.1f},{pose[1]:.1f},{pose[2]:.1f}) "
+            f"current=({after[0]:.1f},{after[1]:.1f},{after[2]:.1f})"
+        )
 
     def _near_pose(
         self,
@@ -793,6 +804,7 @@ class PickPlaceFSM:
                 base_xyz=self._pre_pick_place_base_xyz,
                 z_source="pre_pick_scan",
             )
+            self._viz.update_registry(self._registry)
         except Exception as exc:
             warn(f"restore pre-pick dst base_xyz failed: {exc}")
 

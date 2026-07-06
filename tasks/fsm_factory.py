@@ -6,13 +6,11 @@ from typing import Any
 
 from drivers.arm_driver import ArmDriver
 from drivers.camera_driver import CameraDriver
-from perception.slot_mapper import SlotMapper
-from perception.yolo_detector import YoloDetector
 from planning.command_validator import CommandValidator
 from planning.motion_planner import MotionPlanner
 from tasks.pick_place_fsm import PickPlaceFSM
-from utils.config_loader import load_config, load_yaml
-from world.tube_registry import TubeRegistry
+from utils.config_loader import load_config
+from utils.perception_factory import build_detector, build_registry, build_slot_mapper
 
 
 def build_pick_place_fsm(
@@ -33,31 +31,10 @@ def build_pick_place_fsm(
 
     gripper = None  # CHECK_HW 连接臂后按需创建 GripperDriver
 
-    yolo_cfg = cfg["yolo"]
-    class_map = {int(k): v for k, v in yolo_cfg["classes"].items()}
-    detector = YoloDetector(
-        model_path=yolo_cfg["model_path"],
-        conf_threshold=yolo_cfg["conf_threshold"],
-        iou_threshold=yolo_cfg["iou_threshold"],
-        class_id_to_name=class_map,
-    )
-    detector.load()
-
-    refine_conf = cfg.get("vision", {}).get(
-        "refine_conf_threshold",
-        yolo_cfg["conf_threshold"],
-    )
-    refine_detector = YoloDetector(
-        model_path=yolo_cfg["model_path"],
-        conf_threshold=refine_conf,
-        iou_threshold=yolo_cfg["iou_threshold"],
-        class_id_to_name=class_map,
-    )
-    refine_detector.load()
-
-    rack = load_yaml(cfg["calib"]["rack_layout"])
-    mapper = SlotMapper(rack_config=rack, image_width=cfg["camera"]["width"])
-    registry = TubeRegistry(mapper.all_slot_ids())
+    detector = build_detector(cfg)
+    refine_detector = build_detector(cfg, refine=True)
+    mapper = build_slot_mapper(cfg)
+    registry = build_registry(mapper)
     planner = MotionPlanner.from_config(cfg)
     validator = CommandValidator(registry.slot_ids())
 

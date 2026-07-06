@@ -64,11 +64,13 @@ vision:
   pick_refine_fallback_to_global: false # 二次检测完全无法确认时不直接信任第一次坐标
   pick_refine_projected_match_max_px: 80 # 第一次 base_xyz 投影点与 YOLO 框中心最大像素距离
   pick_refine_projected_bbox_margin_px: 20 # 投影点落在 YOLO 框附近时允许的像素边界余量
-  display_enabled: true         # imshow 总开关
-  live_preview_enabled: false  # 臂移动时 camera_live；现场优先保证 scan/refine 取流稳定
-  scan_imshow_wait_ms: 0        # 0=按键继续，>0 自动停留毫秒
-  refine_imshow_wait_ms: 0
-  live_preview_fps: 15          # 臂移动时相机预览帧率（无 YOLO）
+  display_enabled: true         # dashboard 总开关；false=不弹可视化窗口
+  dashboard_width: 1720
+  dashboard_height: 960
+  scan_history_count: 3         # 左列保留最近几次全局扫描
+  live_preview_enabled: true    # 运动过程中在 dashboard 显示实时相机
+  live_preview_fps: 5
+  save_latest_views: false      # true=自动保存 latest_scan/refine 标注图到 data/captures
   font_scale: 0.28             
 
 motion:

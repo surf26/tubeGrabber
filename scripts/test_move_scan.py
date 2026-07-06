@@ -8,18 +8,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from drivers.arm_driver import ArmDriver, ArmDriverError
-from utils.config_loader import load_config, load_yaml
-
-
-def _pose_dict_to_list(pose: dict) -> list[float]:
-    return [
-        float(pose["x"]),
-        float(pose["y"]),
-        float(pose["z"]),
-        float(pose["rx"]),
-        float(pose["ry"]),
-        float(pose["rz"]),
-    ]
+from utils.config_loader import load_config
+from utils.pose_io import load_pose_list
 
 
 def main() -> int:
@@ -27,8 +17,7 @@ def main() -> int:
     arm = ArmDriver(cfg["arm"]["ip"], cfg["arm"]["port"])
 
     scan_path = cfg["poses"]["scan_pose"]
-    scan_data = load_yaml(scan_path)
-    target = _pose_dict_to_list(scan_data["pose"])
+    target = load_pose_list(scan_path)
     speed = cfg["arm"]["approach_speed"]
 
     print(f"目标 scan_pose（来自 {scan_path}）:")

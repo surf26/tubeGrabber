@@ -17,18 +17,8 @@ if str(ROOT) not in sys.path:
 
 from drivers.arm_driver import ArmDriver, ArmDriverError
 from drivers.camera_driver import CameraDriver, CameraDriverError
-from utils.config_loader import load_config, load_yaml, PROJECT_ROOT
-
-
-def _pose_dict_to_list(pose: dict) -> list[float]:
-    return [
-        float(pose["x"]),
-        float(pose["y"]),
-        float(pose["z"]),
-        float(pose["rx"]),
-        float(pose["ry"]),
-        float(pose["rz"]),
-    ]
+from utils.config_loader import load_config, PROJECT_ROOT
+from utils.pose_io import load_pose_list
 
 
 def main() -> int:
@@ -36,8 +26,7 @@ def main() -> int:
     arm_cfg = cfg["arm"]
     cam_cfg = cfg["camera"]
 
-    scan_data = load_yaml(cfg["poses"]["scan_pose"])
-    scan_pose = _pose_dict_to_list(scan_data["pose"])
+    scan_pose = load_pose_list(cfg["poses"]["scan_pose"])
     speed = arm_cfg["approach_speed"]
 
     print("目标: 移动到 scan_pose 后拍照")

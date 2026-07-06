@@ -28,19 +28,9 @@ if str(ROOT) not in sys.path:
 from drivers.arm_driver import ArmDriver, ArmDriverError
 from drivers.camera_driver import CameraDriver, CameraDriverError
 from perception.coord_transform import load_T_ee_cam, load_intrinsics, pose_6d_to_matrix
-from utils.config_loader import load_config, load_yaml
+from utils.config_loader import load_config
+from utils.pose_io import load_pose_list
 from utils.rack_height import pick_rack_plane_z_interactive, save_rack_plane_z_mm
-
-
-def _pose_dict_to_list(pose: dict) -> list[float]:
-    return [
-        float(pose["x"]),
-        float(pose["y"]),
-        float(pose["z"]),
-        float(pose["rx"]),
-        float(pose["ry"]),
-        float(pose["rz"]),
-    ]
 
 
 def main() -> int:
@@ -89,13 +79,11 @@ def main() -> int:
         if args.pose:
             pose_6d = list(args.pose)
         else:
-            scan = load_yaml(cfg["poses"]["scan_pose"])["pose"]
-            pose_6d = _pose_dict_to_list(scan)
+            pose_6d = load_pose_list(cfg["poses"]["scan_pose"])
             print("使用 scan_pose.json 作为臂姿")
     else:
         arm_cfg = cfg["arm"]
-        scan_data = load_yaml(cfg["poses"]["scan_pose"])
-        pose_6d = _pose_dict_to_list(scan_data["pose"])
+        pose_6d = load_pose_list(cfg["poses"]["scan_pose"])
         speed = arm_cfg["approach_speed"]
 
         print("真机标定：移动到 scan_pose 后拍照")

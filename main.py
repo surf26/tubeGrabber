@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-tube_ws 主程序 CLI。
+tubeGrabber 主程序 CLI。
 
 用法:
   python main.py                          # 交互模式
@@ -59,7 +59,7 @@ def _report_result(ok_flag: bool, fsm) -> None:
         err(fsm.fail_reason)
 
 
-def _run_interactive(fsm, *, config: dict, skip_gripper: bool) -> int:
+def _run_interactive(fsm, *, config: dict) -> int:
     if not _confirm_start(config):
         return 130
     if not fsm.connect_and_scan():
@@ -124,7 +124,7 @@ def _run_interactive(fsm, *, config: dict, skip_gripper: bool) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="tube_ws 试管抓放")
+    parser = argparse.ArgumentParser(description="tubeGrabber 试管抓放")
     parser.add_argument(
         "command",
         nargs="?",
@@ -146,7 +146,7 @@ def main() -> int:
 
     try:
         if args.command is None:
-            return _run_interactive(fsm, config=config, skip_gripper=skip_gripper)
+            return _run_interactive(fsm, config=config)
 
         if not _confirm_start(config):
             return 130

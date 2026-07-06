@@ -29,19 +29,9 @@ from perception.coord_transform import (
     pixel_to_base_mm,
     pose_6d_to_matrix,
 )
-from perception.yolo_detector import YoloDetector
-from utils.config_loader import load_config, load_yaml, PROJECT_ROOT
-
-
-def _pose_dict_to_list(pose: dict) -> list[float]:
-    return [
-        float(pose["x"]),
-        float(pose["y"]),
-        float(pose["z"]),
-        float(pose["rx"]),
-        float(pose["ry"]),
-        float(pose["rz"]),
-    ]
+from utils.config_loader import load_config, PROJECT_ROOT
+from utils.perception_factory import build_detector
+from utils.pose_io import load_pose_list
 
 
 def _pick_detection(detections, prefer_class: str = "tube"):
@@ -79,8 +69,7 @@ def run_live() -> int:
     cam_cfg = cfg["camera"]
     yolo_cfg = cfg["yolo"]
 
-    scan_data = load_yaml(cfg["poses"]["scan_pose"])
-    scan_pose = _pose_dict_to_list(scan_data["pose"])
+    scan_pose = load_pose_list(cfg["poses"]["scan_pose"])
 
     print("将移动到 scan_pose 并拍照，确认安全后按 Enter ...")
     try:
@@ -137,14 +126,7 @@ def _run_pipeline(
     T_ee_cam = load_T_ee_cam()
     T_base_ee = pose_6d_to_matrix(pose_6d)
 
-    class_map = {int(k): v for k, v in yolo_cfg["classes"].items()}
-    detector = YoloDetector(
-        model_path=yolo_cfg["model_path"],
-        conf_threshold=yolo_cfg["conf_threshold"],
-        iou_threshold=yolo_cfg["iou_threshold"],
-        class_id_to_name=class_map,
-    )
-    detector.load()
+    detector = build_detector({"yolo": yolo_cfg})
 
     detections = detector.detect(color)
     print(f"YOLO 检测到 {len(detections)} 个目标")
@@ -228,8 +210,7 @@ def main() -> int:
             pose_6d = list(args.pose)
         else:
             cfg = load_config()
-            scan = load_yaml(cfg["poses"]["scan_pose"])["pose"]
-            pose_6d = _pose_dict_to_list(scan)
+            pose_6d = load_pose_list(cfg["poses"]["scan_pose"])
             print("离线模式：使用 scan_pose.json 作为臂姿")
         return run_offline(color_path, depth_path, pose_6d)
 

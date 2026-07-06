@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from perception.slot_mapper import SlotObservation
+if TYPE_CHECKING:
+    from perception.slot_mapper import SlotObservation
 
 
 class TubeRegistryError(RuntimeError):
