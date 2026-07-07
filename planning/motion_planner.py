@@ -77,6 +77,12 @@ class MotionPlanner:
                 ),
             )
         )
+        self._place_refine_height_mm = float(
+            self._motion.get(
+                "place_refine_height_mm",
+                self._place_approach_height_mm,
+            )
+        )
         self._carried_obstacle_clearance_mm = float(
             self._tube.get("carried_obstacle_clearance_mm", 30.0)
         )
@@ -288,7 +294,7 @@ class MotionPlanner:
         if side not in ("left", "right"):
             raise MotionPlannerError(f"无效 side: {side}")
 
-        refine = self.build_place_approach_pose(slot.base_xyz)
+        refine = self.build_place_refine_pose(slot.base_xyz)
 
         target_z = max(refine[2], self._required_carried_flange_z(slot.base_xyz[2]))
         if self._place_carried_transit_z_mm is not None:
@@ -330,6 +336,13 @@ class MotionPlanner:
     ) -> tuple[float, float, float, float, float, float]:
         """放置位姿：按夹持试管底端留安全高度，而不是只按夹爪 TCP。"""
         return self.build_approach_pose(base_xyz, self._place_approach_height_mm)
+
+    def build_place_refine_pose(
+        self,
+        base_xyz: tuple[float, float, float],
+    ) -> tuple[float, float, float, float, float, float]:
+        """放置精定位观察位：可高于实际放置 approach，避免影响插入深度。"""
+        return self.build_approach_pose(base_xyz, self._place_refine_height_mm)
 
     def build_approach_pose(
         self,

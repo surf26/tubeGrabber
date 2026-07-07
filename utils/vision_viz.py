@@ -220,6 +220,17 @@ class VisionDisplay:
         cv2.destroyAllWindows()
         self._window_ready = False
 
+    def wait_for_quit(self, message: str = "press q/Esc to close dashboard") -> None:
+        if not self._enabled:
+            return
+        self._status = message
+        self.render()
+        print(f"[viewer] {message}")
+        while True:
+            key = cv2.waitKey(50) & 0xFF
+            if key in (ord("q"), 27):
+                return
+
     def _save_view(self, filename: str, img: np.ndarray) -> None:
         if not self._save_views:
             return

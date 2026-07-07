@@ -119,7 +119,6 @@ def _run_interactive(fsm, *, config: dict) -> int:
         err(f"unknown command: {line!r}")
         sub("type 'help' for usage")
 
-    fsm.shutdown()
     return 0
 
 
@@ -182,6 +181,7 @@ def main() -> int:
 
         return 1
     finally:
+        fsm.wait_for_viewer_quit()
         fsm.shutdown()
 
 

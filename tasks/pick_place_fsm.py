@@ -113,6 +113,7 @@ class PickPlaceFSM:
         self._place_approach: tuple[float, float, float, float, float, float] | None = None
         self._pre_pick_place_base_xyz: tuple[float, float, float] | None = None
         self._need_direct_scan = True
+        self._scan_z_offset_mm = 0.0
 
     @property
     def state(self) -> State:
@@ -147,6 +148,11 @@ class PickPlaceFSM:
             except Exception:
                 pass
 
+    def wait_for_viewer_quit(self) -> None:
+        if not bool(self._vision_cfg.get("wait_for_q_on_exit", True)):
+            return
+        self._viz.wait_for_quit()
+
     def run_dry_move(self, cmd_text: str) -> bool:
         """空跑：移动 + 精定位，不夹取。"""
         was_dry = self._dry_run
@@ -178,9 +184,7 @@ class PickPlaceFSM:
             self._skip_gripper = True
 
         try:
-            self._cmd, valid, reason = self._validator.parse_and_validate(
-                cmd_text, self._registry
-            )
+            self._cmd, valid, reason = self._parse_validate_with_scan_retry(cmd_text)
             if not valid or self._cmd is None:
                 self._fail(f"invalid command: {reason}")
                 return False
@@ -294,6 +298,8 @@ class PickPlaceFSM:
         else:
             from_pose = self._last_pose or self._planner.scan_pose
             waypoints = self._planner.plan_to_scan(from_pose)
+        if abs(self._scan_z_offset_mm) > 1e-9:
+            waypoints = self._offset_scan_waypoints(waypoints, self._scan_z_offset_mm)
         print(format_waypoints(waypoints))
         sub("waypoints planned, moving")
         self._execute_waypoints(waypoints, phase="scan")
@@ -352,6 +358,90 @@ class PickPlaceFSM:
         sub(f"cmd valid: {self._cmd.src} -> {self._cmd.dst}")
         return True
 
+    def _parse_validate_with_scan_retry(
+        self,
+        cmd_text: str,
+    ) -> tuple[MoveCommand | None, bool, str]:
+        cmd, valid, reason = self._validator.parse_and_validate(cmd_text, self._registry)
+        if valid or cmd is None or not self._should_rescan_for_validation(reason):
+            return cmd, valid, reason
+
+        self._log_command_slots(cmd, reason)
+        attempts = max(1, int(self._registry_cfg.get("command_validation_scan_attempts", 3)))
+        z_step = float(self._registry_cfg.get("command_validation_scan_z_step_mm", 20))
+        for attempt in range(2, attempts + 1):
+            z_offset = (attempt - 1) * z_step
+            warn(
+                f"command validation failed ({reason}); "
+                f"rescan {attempt}/{attempts} at scan_z_offset={z_offset:.1f}mm"
+            )
+            if not self._scan_global_with_z_offset(z_offset):
+                return cmd, False, self._fail_reason or reason
+            valid, reason = self._validator.validate(cmd, self._registry)
+            if valid:
+                sub(f"cmd valid after rescan {attempt}/{attempts}: {cmd.src} -> {cmd.dst}")
+                return cmd, True, "ok"
+            self._log_command_slots(cmd, reason)
+            if not self._should_rescan_for_validation(reason):
+                break
+        return cmd, False, reason
+
+    def _should_rescan_for_validation(self, reason: str) -> bool:
+        return any(
+            token in reason
+            for token in (
+                "必须是 tube",
+                "必须是 empty",
+                "缺少 base_xyz",
+                "当前没有任何空槽",
+            )
+        )
+
+    def _scan_global_with_z_offset(self, z_offset_mm: float) -> bool:
+        old_offset = self._scan_z_offset_mm
+        self._scan_z_offset_mm = float(z_offset_mm)
+        try:
+            return self._do_scan_global()
+        finally:
+            self._scan_z_offset_mm = old_offset
+
+    def _offset_scan_waypoints(
+        self,
+        waypoints: list[Waypoint],
+        z_offset_mm: float,
+    ) -> list[Waypoint]:
+        scan_z = self._planner.scan_pose[2] + float(z_offset_mm)
+        adjusted: list[Waypoint] = []
+        for wp in waypoints:
+            pose = wp.pose_6d
+            if wp.label in {"scan", "move_above_scan"}:
+                pose = (pose[0], pose[1], scan_z, pose[3], pose[4], pose[5])
+            adjusted.append(Waypoint(wp.label, pose, speed=wp.speed))
+        return adjusted
+
+    def _log_command_slots(self, cmd: MoveCommand, reason: str) -> None:
+        src = self._registry.get(cmd.src)
+        dst = self._registry.get(cmd.dst)
+        warn(f"validation still failed: {reason}")
+        sub(f"src {self._slot_debug(src)}")
+        sub(f"dst {self._slot_debug(dst)}")
+
+    def _slot_debug(self, state) -> str:
+        uv = (
+            f"uv=({state.pixel_uv[0]:.0f},{state.pixel_uv[1]:.0f})"
+            if state.pixel_uv
+            else "uv=-"
+        )
+        xyz = (
+            f"xyz=({state.base_xyz[0]:.1f},{state.base_xyz[1]:.1f},{state.base_xyz[2]:.1f})"
+            if state.base_xyz
+            else "xyz=-"
+        )
+        return (
+            f"{state.slot_id}: klass={state.klass}, conf={state.confidence:.2f}, "
+            f"{uv}, {xyz}, z_src={state.z_source}"
+        )
+
     def _do_pick_transit(self) -> bool:
         assert self._cmd is not None
         src = self._registry.get(self._cmd.src)
@@ -368,7 +458,7 @@ class PickPlaceFSM:
         assert self._cmd is not None
         stage("PICK_REFINE", f"refine slot {self._cmd.src}")
         self._arm.wait_motion_done()
-        time.sleep(0.2)
+        self._wait_refine_settle()
         frame = self._camera.capture()
 
         src = self._registry.get(self._cmd.src)
@@ -409,6 +499,12 @@ class PickPlaceFSM:
                             "pick_refine_projected_fallback_enabled", True
                         )
                     ),
+                    use_ellipse_center=bool(
+                        self._vision_cfg.get("pick_refine_use_ellipse_center", False)
+                    ),
+                    ellipse_bbox_pad_px=float(
+                        self._vision_cfg.get("pick_refine_ellipse_bbox_pad_px", 8)
+                    ),
                 )
             except RefineError as exc:
                 if not self._vision_cfg.get("pick_refine_fallback_to_global", True):
@@ -420,7 +516,9 @@ class PickPlaceFSM:
                 sub(
                     f"base_xyz updated: dist_xy={result.dist_xy_mm:.2f} mm, "
                     f"xyz=({result.base_xyz[0]:.1f},{result.base_xyz[1]:.1f},"
-                    f"{result.base_xyz[2]:.1f}), conf={result.confidence:.3f}"
+                    f"{result.base_xyz[2]:.1f}), "
+                    f"uv=({result.pixel_uv[0]:.1f},{result.pixel_uv[1]:.1f}), "
+                    f"conf={result.confidence:.3f}"
                 )
                 self._registry.update_slot(
                     self._cmd.src,
@@ -474,7 +572,7 @@ class PickPlaceFSM:
             sub("dry-run: skip gripper open")
         else:
             sub(f"gripper open, pick_open_position={pick_open}")
-            self._gripper.open_for_pick()
+            self._gripper.open_for_pick(wait=False)
         if not self._confirm(PROMPT_GRASP):
             return False
         insert = self._planner.build_pick_insert_pose(self._pick_approach)
@@ -484,7 +582,11 @@ class PickPlaceFSM:
             sub("dry-run: skip gripper close")
         else:
             sub(f"gripper close, grip_position={pick_grip}")
-            self._gripper.move_to(pick_grip)
+            self._gripper.move_to(pick_grip, wait=False)
+            grip_settle_s = float(self._config["gripper"].get("pick_grip_settle_s", 1.0))
+            if grip_settle_s > 0:
+                sub(f"settle after gripper close: {grip_settle_s:.1f}s")
+                time.sleep(grip_settle_s)
         retreat = self._planner.build_retreat_pose(insert, retreat_mm)
         sub(f"retreat pick_retreat_mm={retreat_mm:.1f}, speed={self._arm_cfg['default_speed']}")
         self._move_pose(retreat, self._arm_cfg["default_speed"], label="pick_retreat")
@@ -532,7 +634,7 @@ class PickPlaceFSM:
         assert self._cmd is not None
         stage("PLACE_REFINE", f"refine slot {self._cmd.dst}")
         self._arm.wait_motion_done()
-        time.sleep(0.2)
+        self._wait_refine_settle()
         frame = self._camera.capture()
 
         dst = self._registry.get(self._cmd.dst)
@@ -664,7 +766,11 @@ class PickPlaceFSM:
             sub("dry-run: skip gripper release")
         else:
             sub(f"gripper open, release_open_position={release_open}")
-            self._gripper.open_for_release()
+            self._gripper.open_for_release(wait=False)
+            release_settle_s = float(self._config["gripper"].get("release_settle_s", 1.0))
+            if release_settle_s > 0:
+                sub(f"settle after gripper release: {release_settle_s:.1f}s")
+                time.sleep(release_settle_s)
         retreat = self._planner.build_retreat_pose(insert, retreat_mm)
         sub(f"retreat place_retreat_mm={retreat_mm:.1f}, speed={self._arm_cfg['default_speed']}")
         self._move_pose(retreat, self._arm_cfg["default_speed"], label="place_retreat")
@@ -672,7 +778,8 @@ class PickPlaceFSM:
             sub("dry-run: skip gripper reset")
         else:
             sub("gripper reset, close_position=0")
-            self._gripper.close(wait=False)
+            self._gripper.close(wait=True)
+            sub("gripper reset OK")
         self._registry.update_slot(
             self._cmd.dst, klass="unknown", z_source="pending_verify"
         )
@@ -753,16 +860,65 @@ class PickPlaceFSM:
 
         self._viz.set_status(f"moving: {label}")
         self._arm.move_p(pose, speed=speed, block=False)
-        deadline = time.monotonic() + 120.0
-        while time.monotonic() < deadline:
-            self._viz.tick_live(status=f"moving: {label}")
-            if self._near_pose(pose, tol_mm=2.0, tol_rad=0.08):
-                after = self._arm.get_pose_6d()
-                moved = max(abs(after[i] - cur[i]) for i in range(3))
-                move_done(label, after[:3], moved)
-                self._viz.tick_live(status=f"reached: {label}")
-                return
-            time.sleep(0.1)
+        move_timeout_s = float(self._motion.get("move_timeout_s", 120.0))
+        progress_log_s = float(self._motion.get("move_progress_log_s", 2.0))
+        stall_timeout_s = float(self._motion.get("move_stall_timeout_s", 8.0))
+        stall_tol_mm = float(self._motion.get("move_stall_tol_mm", 0.5))
+
+        deadline = time.monotonic() + move_timeout_s
+        last_progress_pose = cur
+        last_progress_t = time.monotonic()
+        last_log_t = last_progress_t
+        try:
+            while time.monotonic() < deadline:
+                self._viz.tick_live(status=f"moving: {label}")
+                now = time.monotonic()
+                current = self._arm.get_pose_6d()
+                xyz_err = max(abs(current[i] - pose[i]) for i in range(3))
+                rpy_err = max(abs(current[i] - pose[i]) for i in range(3, 6))
+                if xyz_err <= 2.0 and rpy_err <= 0.08:
+                    moved = max(abs(current[i] - cur[i]) for i in range(3))
+                    move_done(label, current[:3], moved)
+                    self._viz.tick_live(status=f"reached: {label}")
+                    return
+
+                progress_mm = max(
+                    abs(current[i] - last_progress_pose[i]) for i in range(3)
+                )
+                if progress_mm > stall_tol_mm:
+                    last_progress_pose = current
+                    last_progress_t = now
+                elif now - last_progress_t >= stall_timeout_s:
+                    warn(
+                        f"move_p [{label}] stalled, sending slow stop | "
+                        f"remain={xyz_err:.1f}mm | "
+                        f"current=({current[0]:.1f},{current[1]:.1f},{current[2]:.1f})"
+                    )
+                    self._arm.stop(emergency=False)
+                    raise FSMError(
+                        f"move_p [{label}] stalled: "
+                        f"target=({pose[0]:.1f},{pose[1]:.1f},{pose[2]:.1f}) "
+                        f"current=({current[0]:.1f},{current[1]:.1f},{current[2]:.1f}) "
+                        f"remain={xyz_err:.1f}mm"
+                    )
+
+                if progress_log_s > 0 and now - last_log_t >= progress_log_s:
+                    sub(
+                        f"move_p [{label}] moving... "
+                        f"remain={xyz_err:.1f}mm, "
+                        f"current=({current[0]:.1f},{current[1]:.1f},{current[2]:.1f})"
+                    )
+                    last_log_t = now
+                time.sleep(0.1)
+        except KeyboardInterrupt as exc:
+            warn(f"cancelled during move_p [{label}], sending slow stop")
+            try:
+                self._arm.stop(emergency=False)
+            except Exception as stop_exc:
+                raise FSMError(
+                    f"cancelled during move_p [{label}], stop failed: {stop_exc}"
+                ) from stop_exc
+            raise FSMError(f"cancelled during move_p [{label}]") from exc
         after = self._arm.get_pose_6d()
         raise FSMError(
             f"move_p [{label}] timeout: "
@@ -792,6 +948,12 @@ class PickPlaceFSM:
             float(self._registry_cfg.get("slot_match_max_dist_mm", 15)),
             float(self._registry_cfg.get("refine_ambiguity_min_delta_mm", 2)),
         )
+
+    def _wait_refine_settle(self) -> None:
+        settle_s = float(self._motion.get("refine_settle_s", 0.2))
+        if settle_s > 0:
+            sub(f"settle before refine capture: {settle_s:.1f}s")
+            time.sleep(settle_s)
 
     def _restore_pre_pick_place_target(self) -> None:
         """抓取后 scan 可能被夹持试管干扰，放置目标坐标优先使用抓前扫描值。"""

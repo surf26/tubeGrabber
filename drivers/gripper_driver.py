@@ -13,6 +13,17 @@ from Robotic_Arm.rm_robot_interface import (
 from drivers.arm_driver import ArmDriver
 
 
+_SDK_RETRIABLE_CODES = {-5, -4, -3, -2, -1, 1}
+_SDK_ERROR_DETAILS = {
+    1: " (控制器返回 false：参数或机械臂状态异常)",
+    -1: " (数据发送失败)",
+    -2: " (数据接收失败或控制器未返回)",
+    -3: " (返回值解析失败)",
+    -4: " (超时)",
+    -5: " (超时未返回)",
+}
+
+
 class GripperDriverError(RuntimeError):
     """夹爪 Modbus 通信或控制异常。"""
 
@@ -34,6 +45,9 @@ class GripperDriver:
         self._release_open_pos = int(config.get("release_open_position", self._open_pos))
         self._close_pos = int(config["close_position"])
         self._full_stroke = int(config.get("full_stroke", 1000))
+        self._sdk_min_position = int(config.get("sdk_min_position", 1))
+        self._sdk_retry_count = int(config.get("sdk_retry_count", 1))
+        self._sdk_recover_wait_s = float(config.get("sdk_recover_wait_s", 0.5))
 
         self._reg_zero_speed = int(config.get("reg_zero_speed", config.get("reg_position", 36)))
         self._reg_init_speed = int(config.get("reg_init_speed", config.get("reg_speed", 38)))
@@ -187,16 +201,53 @@ class GripperDriver:
         if not hasattr(robot, "rm_set_gripper_position"):
             raise GripperDriverError("当前 SDK 缺少 rm_set_gripper_position")
 
-        timeout = max(0, int(round(timeout_s)))
-        ret = robot.rm_set_gripper_position(int(position), bool(wait), timeout)
-        if ret == 0:
-            return
-        if already_closed_ok and int(position) == self._close_pos and ret in (1, -4):
-            return
+        timeout = max(0, int(round(timeout_s))) if wait else 0
+        sdk_position = self._sdk_command_position(position)
+        ret = None
+        recover_note = ""
+
+        for attempt in range(self._sdk_retry_count + 1):
+            ret = robot.rm_set_gripper_position(sdk_position, bool(wait), timeout)
+            if ret == 0:
+                return
+            if already_closed_ok and int(position) == self._close_pos and ret in (1, -4):
+                return
+            if attempt >= self._sdk_retry_count or ret not in _SDK_RETRIABLE_CODES:
+                break
+            recover_note = self._recover_realman_sdk(robot)
+
+        detail = _sdk_error_detail(ret)
+        mapped = ""
+        if sdk_position != int(position):
+            mapped = f", SDK 实际发送位置={sdk_position}"
         raise GripperDriverError(
             f"rm_set_gripper_position({position}, wait={wait}, timeout={timeout}) "
-            f"失败，SDK 错误码: {ret}"
+            f"失败，SDK 错误码: {ret}{detail}{mapped}{recover_note}"
         )
+
+    def _sdk_command_position(self, position: int) -> int:
+        # Realman SDK position control documents 1..1000; keep config-level 0 as
+        # "fully closed" but never send the invalid value to the SDK backend.
+        return max(self._sdk_min_position, min(int(position), self._full_stroke))
+
+    def _recover_realman_sdk(self, robot) -> str:
+        notes: list[str] = []
+        if hasattr(robot, "rm_clear_system_err"):
+            ret = robot.rm_clear_system_err()
+            if ret != 0:
+                notes.append(f"clear_system_err={ret}")
+        ret = robot.rm_set_tool_voltage(self._tool_voltage)
+        if ret != 0:
+            notes.append(f"tool_voltage={ret}")
+        time.sleep(self._sdk_recover_wait_s)
+        if hasattr(robot, "rm_set_rm_plus_mode"):
+            ret = robot.rm_set_rm_plus_mode(self._baudrate)
+            if ret != 0:
+                notes.append(f"rm_plus_mode={ret}")
+        time.sleep(self._sdk_recover_wait_s)
+        if notes:
+            return "；恢复尝试异常: " + ", ".join(notes)
+        return "；已尝试清错并重置工具电压/RM Plus 后重试"
 
     def _setup_rs485(self, robot) -> bool:
         """配置工具端 RS485；优先第四代 rm_set_tool_rs485_mode，失败则回退 rm_set_modbus_mode。"""
@@ -348,3 +399,9 @@ def _regs_to_value(regs: list[int]) -> int:
     if val >= 0x80000000:
         val -= 0x100000000
     return int(val)
+
+
+def _sdk_error_detail(ret: int | None) -> str:
+    if ret is None:
+        return ""
+    return _SDK_ERROR_DETAILS.get(int(ret), "")
