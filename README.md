@@ -1,209 +1,157 @@
-# tubeGrabber
+# Tube Grabber
 
-**24 孔试管架视觉引导抓放系统**
+面向 2×6 试管架的视觉引导抓放主线。最终视觉方案只有一条：
 
-Realman RM-65B · Orbbec 336L 腕部相机 · RS485 平行夹爪 · YOLO（`empty` / `tube`）
+- `cap.pt`：YOLO detection 识别试管盖，结合 D435 对齐深度得到盖顶三维坐标；
+- `rack_pose.pt`：YOLO Pose 识别架面 8 点，顺序固定为
+  `k0, k1, k2, k3, screw_k0, screw_k1, screw_k2, screw_k3`；
+- `screw_k0` 旁的小红圆点独立确认架面方向；
+- 连续多帧推理经过几何检查、异常帧剔除和中值聚合；
+- RGB-D 架面 ROI 使用 RANSAC 拟合真实平面；
+- 正上方标定时自动拟合 `r1c1`、`r2c6` 槽圆，人工微调圆心和半径后生成 12 个槽位；
+- 槽位不再使用 YOLO detection，空槽由“没有盖子匹配到该标定槽位”确定。
 
----
+## 当前状态
 
-## 概述
+代码、fake 闭环和离线测试已经完成。架面 Pose 模型尚未训练，仓库也不提交
+`.pt` 权重；真实精度、GPU 帧率、双圆心标定、手眼矩阵、TCP 和运动参数仍需在
+部署机与真机上验收。没有模型或标定时 real 模式会明确拒绝运行，不会回退到旧的
+孔位 detection 或 CPU 推理。
 
-`tubeGrabber` 是一套分层式机器人软件栈，用于在两个 12 孔试管架（共 24 槽）之间自动搬运试管。槽位 ID（如 `left.a1`、`right.b2`）为逻辑编号、长期稳定；**物理坐标在每次全局扫描时由 RGB-D 视觉、手眼标定与当前臂姿重新解算**，不写入配置文件。
-
-**设计要点**
-
-- **扫描驱动世界模型** — 配置中不硬编码槽位坐标
-- **停稳—拍照—精定位** — 逼近阶段在臂停止后重新取帧；运动过程中不做 YOLO 追踪
-- **TCP 感知运动规划** — 视觉输出夹爪 TCP 目标；规划器通过 `gripper.tcp_offset_mm` 换算法兰位姿
-- **严格分层** — `drivers` → `perception` → `world` → `planning` → `tasks`
-
----
-
-## 系统架构
-
-```text
-┌─────────────────────────────────────────────────────────────┐
-│  main.py / PickPlaceFSM                                     │
-├──────────────┬──────────────┬──────────────┬──────────────——┤
-│  planning/   │  world/      │  perception/ │  drivers/      │
-│  指令校验     │  状态表       │  YOLO         │  机械臂         │
-│  路点规划     │  registry    │  槽位映射      │  相机           │
-│              │              │  精定位       │  夹爪           │
-└──────────────┴──────────────┴──────────────┴──────────────——┘
-         config/          data/models/        utils/
-```
-
-| 层级 | 职责 |
-|------|------|
-| `drivers/` | 硬件 I/O（臂、相机、夹爪 Modbus） |
-| `perception/` | 检测、像素→基坐标、24 槽映射、精定位 |
-| `world/` | 24 槽状态持久化（`TubeRegistry`） |
-| `planning/` | 指令校验、运动路点生成 |
-| `tasks/` | 抓放状态机编排 |
-
----
-
-## 硬件配置
-
-| 设备 | 规格 |
-|------|------|
-| 机械臂 | Realman RM-65B，`192.168.1.18:8080` |
-| 相机 | Orbbec 336L（eye-in-hand），640×480，序列号见配置 |
-| 夹爪 | RS485 平行夹爪，经臂末端 Modbus（`port=1`） |
-| 视觉模型 | YOLO 权重 `data/models/best.pt`，类别 `empty` / `tube` |
-
----
-
-## 环境要求
-
-- Python 3.10+
-- Linux，深度相机 USB 可用
-
-```bash
-pip install -r requirements.txt
-```
-
-主要依赖：`numpy`、`opencv-python`、`pyyaml`、`ultralytics`、`pyorbbecsdk2`、`Robotic_Arm`。
-
-从零部署、现场验收和排错流程见：[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)。
-
----
-
-## 配置说明
-
-主配置文件：[`config/default.yaml`](config/default.yaml)
-
-| 配置段 | 说明 |
-|--------|------|
-| `arm` | IP、端口、运动速度 |
-| `camera` | 序列号、分辨率、深度有效范围 |
-| `gripper` | Modbus 参数、**`tcp_offset_mm`**（法兰→指尖，末端坐标系） |
-| `yolo` | 模型路径、阈值、类别映射 |
-| `vision` | 精定位置信度、可视化（`display_enabled`、`font_scale`） |
-| `motion` | 逼近高度、插入/退避深度 |
-| `poses` | 示教位姿：scan、region、vertical（`config/poses/*.json`） |
-| `calib` | 手眼、内参、试管架布局 |
-
-标定文件：
-
-- [`config/hand_eye.yaml`](config/hand_eye.yaml) — eye-in-hand `T_ee_cam`
-- [`config/camera_intrinsics.yaml`](config/camera_intrinsics.yaml)
-- [`config/rack_layout.yaml`](config/rack_layout.yaml) — 槽位命名；`default_rack_plane_z_mm` 由架面标定写入
-
----
-
-## 快速开始
-
-### 交互模式
-
-```bash
-python main.py
-```
-
-启动后自动：连接硬件 → 全局扫描 → 进入命令行交互。
-
-### 单次命令
-
-```bash
-python main.py scan                                    # 连接并扫描
-python main.py dry-run left.a1 right.b2 --no-gripper   # 空跑：移动 + 精定位，不夹取
-python main.py move left.a1 right.b2                   # 完整抓放
-```
-
-### 交互命令
-
-| 命令 | 说明 |
-|------|------|
-| `scan` | 重新全局扫描 24 槽 |
-| `table` | 打印当前状态表 |
-| `move SRC DST` | 完整抓放（含 VERIFY） |
-| `dry-run SRC DST` | 仅 transit + refine，不夹取/放置 |
-| `SRC DST` | `move` 的简写 |
-| `quit` | 退出 |
-
-槽位格式：`{side}.{row}{col}`，如 `left.a1`、`right.b2`（建议小写）。
-
----
-
-## 测试脚本
-
-按顺序执行，勿跳步。
-
-| 步骤 | 命令 | 目标 |
-|------|------|------|
-| 1 | `python scripts/test_arm_connect.py` | 臂连接与位姿回读 |
-| 2 | `python scripts/test_camera_capture.py` | RGB-D 取流 |
-| 3 | `python scripts/test_gripper.py` | 夹爪 Modbus 开合 |
-| 4 | `python scripts/test_scan_and_capture.py` | scan 位拍照 |
-| 5 | `python scripts/calibrate_rack_height.py` | 架面平面 Z 标定 |
-| 6 | `python main.py dry-run … --no-gripper` | 路径与精定位验证 |
-| 7 | `python main.py move …` | 端到端搬运 |
-
-完整部署、检查项、安全须知与调参说明：**[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)**
-
----
-
-## 坐标约定
-
-| 量 | 坐标系 / 含义 |
-|----|----------------|
-| 臂 `get_pose_6d()` | 基坐标系下的 **法兰** 位姿（mm，rad） |
-| 视觉 `base_xyz` | 基坐标系下的 **夹爪 TCP** 目标（试管抓取点） |
-| `gripper.tcp_offset_mm` | **末端坐标系**下 TCP 相对法兰的平移；`tip = flange + R @ offset` |
-| 手眼 `T_ee_cam` | 相机 → 法兰（非指尖） |
-
-运动规划在生成法兰路点时应用 TCP 偏移；视觉解算链路不变。
-
----
-
-## 运行时可视化
-
-由 `config/default.yaml` → `vision` 控制：
-
-程序只使用一个窗口：`tubeGrabber Dashboard`。
-
-| 区域 | 内容 |
-|------|------|
-| 左列 | 最近几次全局 YOLO 扫描结果 |
-| 中上 | 最新 pick / place 精定位结果 |
-| 中下 | 运动过程实时相机画面 |
-| 右列 | 24 槽试管状态表、置信度、坐标与 Z 来源 |
-
-dashboard 不等待按键确认，会随流程自动刷新。无图形界面时设 `vision.display_enabled: false`；如需保存最新标注图，设 `vision.save_latest_views: true`。
-
----
-
-## 离线验证（无机械臂）
-
-```bash
-# 由已保存 scan 图验证 24 槽映射
-python scripts/test_slot_mapper_offline.py data/captures/scan_xxx_color.png \
-  --depth data/captures/scan_xxx_depth.png
-
-# 规划 / 状态表 / 精定位
-python scripts/test_motion_planner.py left.a1 right.b2
-python scripts/test_command_validator.py
-python scripts/test_refine_offline.py color.png depth.png left.a1
-python scripts/test_tube_registry.py color.png --depth depth.png
-```
-
-硬件分层测试脚本位于 `scripts/test_*.py`。
-
----
-
-## 项目结构
+## 架构
 
 ```text
-tubeGrabber/
-├── main.py                 # CLI 入口
-├── config/                 # 运行配置、示教位姿、标定文件
-├── drivers/                # 机械臂、相机、夹爪驱动
-├── perception/             # YOLO、坐标变换、槽位映射、精定位
-├── world/                  # TubeRegistry 状态表
-├── planning/               # 指令校验、运动规划
-├── tasks/                  # 状态机与工厂
-├── utils/                  # 配置加载、可视化、架面标定工具
-├── scripts/                # 上机与离线测试脚本
-├── data/models/            # YOLO 权重
-└── docs/                   # 开发与上机文档
+D435 连续 RGB-D 帧 + 右臂观察位姿
+        │
+        ├─ rack_pose.pt ─→ 8 点 + K0 红点方向检查
+        │                  └→ 多帧异常值剔除/中值融合
+        │
+        ├─ 架面四角 ROI 深度 ─→ RANSAC 平面
+        │
+        └─ cap.pt ─→ 盖中心深度 ─→ 盖顶 base_right XYZ
+                           │
+双圆心标定 r1c1/r2c6 ─→ 12 槽投影 ─→ 盖子/槽位匹配
+                           │
+                    RackObservation
+                           │
+     自动观察位 → 最新抓取 → 高位目标复检/重规划
+                           │
+              放置 → 自动回观察位 → 最终复扫
 ```
+
+边界保持单向：`vision` 只输出观测，`workflow` 只处理任务状态，`motion` 只处理
+坐标和轨迹，`hardware` 是唯一调用 RealSense/RealMan SDK 的层。项目内部位置统一
+为 mm、角度为 rad、工作坐标系为 `base_right`；只有机械臂驱动边界进行 mm↔m。
+
+详细设计见 [架构说明](docs/ARCHITECTURE.md)，模型与标注见
+[模型契约](docs/MODEL_CONTRACT.md)。从安装、训练、标定到真机分阶段执行的完整操作流程见
+[详细使用说明](docs/USAGE.md)。底盘站点、跨架状态机、失败恢复、麦克风选择和离线语音方案见
+[底盘导航与语音控制完整实施方案](docs/NAVIGATION_AND_VOICE.md)。
+
+## 安装与 GPU
+
+Python 要求 ≥3.10。真实部署应先按本机 CUDA/驱动版本安装 CUDA 版 PyTorch，再安装：
+
+```bash
+python -m pip install -e ".[vision,realsense]"
+```
+
+RealMan SDK 需要由厂商安装并可导入：
+
+```bash
+python -c "from Robotic_Arm import rm_robot_interface; print('RealMan SDK OK')"
+```
+
+`config/app.yaml` 的最终推理设备固定为 `"0"`（CUDA:0）。`doctor` 会检查 CUDA
+版 PyTorch、GPU、两个模型、两份槽位标定、手眼、观察位和运动参数；real 模式下
+任一缺失都会失败，不静默使用 CPU。
+
+## 模型制作
+
+1. 在 `screw_k0` 旁贴好永久小红圆点。
+2. 采集架面图片：
+
+```bash
+python tools/capture_rack_pose_dataset.py --count 500
+```
+
+3. 按 [8 点标注契约](training/RACK_POSE_CONTRACT.md) 标注，并按采集序列划分
+   train/val/test。
+4. 复制 `training/rack_pose.yaml.example` 为 `training/rack_pose.yaml`，填写数据路径。
+5. 用本机 GPU 训练并验收：
+
+```bash
+python tools/train_rack_pose.py --data training/rack_pose.yaml
+python tools/validate_rack_pose.py --data training/rack_pose.yaml --weights models/rack_pose.pt
+```
+
+最终放置：
+
+```text
+models/cap.pt
+models/rack_pose.pt
+```
+
+## 正上方双圆心标定
+
+先清空 `r1c1`、`r2c6`，低速手动将腕部相机调整到架面正上方并保持机械臂静止。
+标定视角可以不同于正常运行观察位。真实配置和模型就绪后分别运行：
+
+```bash
+python -m tube_grabber calibrate-rack --rack rack_1
+python -m tube_grabber calibrate-rack --rack rack_2
+```
+
+程序先采集 7 帧并筛出至少 5 个稳定帧，然后显示融合后的 K0～K3、四个螺丝孔和
+红点方向结果。标定操作如下：
+
+1. 在 `r1c1` 槽圆附近点击，程序用 Hough 圆拟合给出初始圆；未检测到时使用默认圆。
+2. 按住鼠标左键拖动圆心；用 `[`/`]` 或 `-`/`+` 调半径；方向键或 `I/J/K/L`
+   每次微调圆心 1 px。
+3. 圆周贴合槽边后按 Enter 或空格确认，随后以相同方式确认 `r2c6`。
+4. 检查绿色 2×6 网格中心均落在槽中心后按 `s` 保存。Backspace 撤回，`r` 全部
+   重置，`q` 取消。
+
+最终使用的是两个调整后圆的圆心；半径仅用于帮助准确贴合槽边。标定写入
+`config/racks/rack_1.yaml` 或 `rack_2.yaml`，覆盖必须显式使用 `--force`。
+
+两个圆心和 8 个关键点都会转换到架面归一化坐标，因此正上方标定后可以回到正常
+观察位运行。参考检查比较的是跨视角不变的归一化布局，而不是标定图片的绝对像素。
+模型关键点语义、机架结构或相机内参改变后应重新标定；相机安装变化还必须重做手眼。
+旧的绝对像素标定格式不会被接受，应使用 `--force` 重新生成当前标定。
+
+## 运行命令
+
+```bash
+python -m tube_grabber doctor
+python -m tube_grabber arm-status
+python -m tube_grabber camera-check
+python -m tube_grabber gripper-status
+python -m tube_grabber scan --rack rack_1
+python -m tube_grabber plan-transfer --source rack_1.r1c1 --destination rack_1.r2c6
+python -m tube_grabber transfer --source rack_1.r1c1 --destination rack_1.r2c6
+```
+
+默认 `runtime.mode: fake`。真实运动还要求观察位与运动参数已确认、控制器为真实模式且
+上电、控制器和关节无错误、没有 `atom/zhixing_ctrl.py` 抢占控制。`transfer` 先要求
+确认物理空载并输入 `EMPTY`，然后自动进入旧 AprilTag 流程的全局观察位；预览后输入
+`MOVE`。执行前复扫会重建抓取计划，携管时在目标高位走廊复检并重规划放置，释放后
+自动回观察位，最终确认源空、目标占用才成功。`plan-transfer` 保持零运动承诺，因此
+运行前仍需人工将右臂置于观察位。
+
+夹爪按当前 RealMan 两指夹爪接入：只使用两指夹爪专用的
+`rm_set_gripper_position` 与 `rm_get_gripper_state`；不会调用六自由度灵巧手的
+`rm_set_hand_follow_pos`。阻塞命令返回后还会连续检查在线、使能、错误码、工作模式
+和实际开度。
+
+## 测试
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+离线测试覆盖模型契约、K0 红点、关键点几何、多帧滤波、双点标定、架面 RANSAC、
+完整 Pose+cap+槽位流水线、坐标变换、最新坐标重规划、观察位往返、最终状态验证、
+运动规划、硬件 SDK 翻译和 fake 抓放闭环。
+
+首次真机必须按 [实验室检查清单](docs/LAB_CHECKLIST.md) 从只读检查逐级推进。

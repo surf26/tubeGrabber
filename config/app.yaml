@@ -1,0 +1,155 @@
+# Final project configuration. Positions use mm; angles use rad.
+
+runtime:
+  # fake: no hardware; real: D435 + RealMan arm + gripper
+  # Keep fake until every item in docs/LAB_CHECKLIST.md has passed.
+  mode: fake
+  require_enter_before_motion: true
+  save_debug_images: true
+  observation_position_tolerance_mm: 5.0
+  observation_orientation_tolerance_deg: 2.0
+  scene_recheck_pixel_tolerance_px: 5.0
+  scene_recheck_position_tolerance_mm: 2.0
+  scene_recheck_plane_tolerance_mm: 2.0
+
+agent:
+  # local: offline parser for canonical rack_1.r1c1 addresses
+  # gemini: natural-language parser; reads the key from GEMINI_API_KEY
+  provider: local
+  model: "gemini-3.5-flash"
+  api_key_env: "GEMINI_API_KEY"
+
+camera:
+  serial: "405622073249"
+  width: 1280
+  height: 720
+  fps: 30
+  warmup_frames: 60
+  timeout_ms: 20000
+  depth_min_mm: 100
+  depth_max_mm: 1200
+
+arm:
+  ip: "169.254.128.19"
+  port: 8080
+  expected_dof: 7
+  work_frame: "Base"
+  # Built-in flange frame. The project applies its own flange -> gripper TCP offset.
+  tool_frame: "Arm_Tip"
+  reject_conflicting_processes: true
+  conflicting_processes: [atom, zhixing_ctrl.py]
+  transit_speed_percent: 10
+  approach_speed_percent: 5
+
+gripper:
+  open_position: 170
+  grip_position: 135
+  reset_position: 1
+  command_timeout_s: 5
+  position_tolerance: 8
+  poll_interval_s: 0.1
+  state_read_attempts: 6
+  state_read_retry_s: 0.25
+
+vision:
+  # Final deployment uses the first local CUDA GPU. doctor rejects real mode
+  # if CUDA-enabled PyTorch or the GPU is unavailable; there is no CPU fallback.
+  device: "0"
+  cap:
+    model_path: "models/cap.pt"
+    class_names:
+      0: tube_cap
+    confidence: 0.50
+    iou: 0.45
+    image_size: 1280
+    depth_window_px: 7
+    maximum_height_error_mm: 4.0
+  rack_pose:
+    model_path: "models/rack_pose.pt"
+    class_names:
+      0: rack_surface
+    # Fixed annotation/output order. K0..K3 are clockwise rack corners.
+    keypoint_names: [k0, k1, k2, k3, screw_k0, screw_k1, screw_k2, screw_k3]
+    confidence: 0.65
+    keypoint_confidence: 0.60
+    iou: 0.45
+    image_size: 1280
+    minimum_rack_area_px2: 20000
+    maximum_opposite_side_ratio: 1.35
+    screw_edge_margin: 0.03
+    k0_red_marker:
+      patch_radius_px: 14
+      minimum_red_ratio: 0.05
+      minimum_ratio_margin: 0.03
+      minimum_saturation: 100
+      minimum_value: 80
+  calibration:
+    # Click near each endpoint slot; Hough fit supplies the initial circle.
+    search_radius_px: 70
+    minimum_radius_px: 8
+    maximum_radius_px: 45
+    default_radius_px: 22
+    hough_dp: 1.2
+    hough_min_distance_px: 14.0
+    hough_edge_threshold: 100.0
+    hough_accumulator_threshold: 16.0
+  stability:
+    capture_frames: 7
+    minimum_inlier_frames: 5
+    maximum_frame_residual_px: 3.0
+    maximum_keypoint_spread_px: 3.0
+    minimum_occupancy_agreement: 0.80
+    maximum_slot_position_spread_mm: 2.5
+    maximum_cap_position_spread_mm: 3.0
+  plane:
+    sample_stride_px: 8
+    roi_margin_px: 8
+    landmark_exclusion_radius_px: 10
+    ransac_iterations: 300
+    inlier_threshold_mm: 2.0
+    minimum_inliers: 250
+    minimum_inlier_ratio: 0.35
+    maximum_rms_error_mm: 1.5
+    maximum_tilt_deg: 8.0
+  matching:
+    cap_slot_max_distance_factor: 0.45
+    # Viewpoint-invariant distance in normalized rack coordinates.
+    maximum_calibration_keypoint_shift_ratio: 0.04
+
+racks:
+  rack_1:
+    calibration_path: "config/racks/rack_1.yaml"
+  rack_2:
+    calibration_path: "config/racks/rack_2.yaml"
+
+geometry:
+  hand_eye_path: "config/hand_eye.yaml"
+  # Provisional flange -> gripper TCP offset. Measure the final tool before
+  # setting motion.parameters_confirmed to true.
+  tcp_offset_end_mm: [0.0, 0.0, 220.0]
+  # Provisional value. Remeasure with the final rack and seated tube.
+  cap_top_above_rack_mm: 47.0
+  grasp_depth_below_cap_mm: 5.0
+  # Positive: place shallower (higher Z). Negative: place deeper (lower Z).
+  seating_adjust_mm: 0.0
+  # Provisional value from the old tube; remeasure the final tube.
+  tube_total_length_mm: 120.0
+  required_carried_clearance_mm: 30.0
+
+motion:
+  # Set true only after checking TCP offset, workspace and all vertical heights
+  # on the physical right arm at low speed.
+  parameters_confirmed: false
+  poses_path: "config/poses.yaml"
+  approach_height_mm: 50.0
+  # 150 mm keeps the carried tube above neighbouring tube caps during XY travel.
+  retreat_height_mm: 150.0
+  maximum_orientation_error_deg: 5.0
+  # Reused from the proven AprilTag global-observation move gate.
+  maximum_single_orientation_change_deg: 30.0
+  maximum_tool_tilt_deg: 1.0
+  maximum_single_move_mm: 500.0
+  position_reached_tolerance_mm: 1.0
+  orientation_reached_tolerance_deg: 0.5
+  workspace_min_mm: [-50.0, 200.0, -250.0]
+  workspace_max_mm: [200.0, 550.0, -40.0]
